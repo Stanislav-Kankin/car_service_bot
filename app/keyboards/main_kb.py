@@ -1,7 +1,7 @@
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton
-    )
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 
@@ -97,5 +97,49 @@ def get_car_cancel_kb():
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_car_add")
+    )
+    return builder.as_markup()
+
+
+# Клавиатура для выбора типа услуги
+def get_service_types_kb():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="⛽ Топливо", callback_data="service_fuel"),
+        InlineKeyboardButton(text="🧼 Автомойка", callback_data="service_wash")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🛞 Помощь в дороге", callback_data="service_roadside"),
+        InlineKeyboardButton(text="🔧 СТО", callback_data="service_sto")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🛞 Запчасти", callback_data="service_parts"),
+        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request")
+    )
+    return builder.as_markup()
+
+
+# Клавиатура для пропуска фото
+def get_photo_skip_kb():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📷 Прикрепить фото", callback_data="attach_photo"),
+        InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_photo")
+    )
+    builder.row(
+        InlineKeyboardButton(text="❌ Отменить заявку", callback_data="cancel_request")
+    )
+    return builder.as_markup()
+
+
+# Клавиатура для подтверждения заявки
+def get_request_confirm_kb():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Отправить заявку", callback_data="confirm_request"),
+        InlineKeyboardButton(text="✏️ Исправить", callback_data="edit_request")
+    )
+    builder.row(
+        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request")
     )
     return builder.as_markup()
