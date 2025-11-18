@@ -7,6 +7,7 @@ from app.config import config
 engine = create_engine(config.DB_URL, echo=True)
 SessionLocal = sessionmaker(bind=engine)
 
+
 def create_tables():
     """Синхронное создание таблиц"""
     Base.metadata.create_all(bind=engine)

@@ -56,3 +56,46 @@ def get_cancel_kb():
         InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_action")
     )
     return builder.as_markup()
+
+
+# Клавиатура для раздела "Мой гараж"
+def get_garage_kb():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="➕ Добавить авто", callback_data="add_car"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")
+    )
+    return builder.as_markup()
+
+
+# Клавиатура для управления конкретным авто
+def get_car_management_kb(car_id: int):
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📝 Создать заявку", callback_data=f"create_request:{car_id}"),
+        InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit_car:{car_id}")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"delete_car:{car_id}"),
+        InlineKeyboardButton(text="⬅️ Назад в гараж", callback_data="my_garage")
+    )
+    return builder.as_markup()
+
+
+# Клавиатура для подтверждения удаления
+def get_delete_confirm_kb(car_id: int):
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete:{car_id}"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_delete:{car_id}")
+    )
+    return builder.as_markup()
+
+
+# Клавиатура для отмены в процессе добавления авто
+def get_car_cancel_kb():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_car_add")
+    )
+    return builder.as_markup()
