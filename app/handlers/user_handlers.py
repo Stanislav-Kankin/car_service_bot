@@ -9,12 +9,14 @@ from datetime import datetime
 import logging
 
 from app.database.models import User, Car, Request
+from app.handlers.manager_handlers import notify_manager_about_new_request
 from app.database.db import SessionLocal
 from app.keyboards.main_kb import (
     get_main_kb, get_registration_kb,
     get_phone_reply_kb, get_garage_kb,
     get_car_management_kb, get_car_cancel_kb,
-    get_service_types_kb, get_photo_skip_kb, get_request_confirm_kb
+    get_service_types_kb, get_photo_skip_kb, get_request_confirm_kb,
+    get_delete_confirm_kb
 )
 
 
@@ -837,11 +839,17 @@ async def process_photo_message(message: Message, state: FSMContext):
     photo_file_id = message.photo[-1].file_id
     await state.update_data(photo_file_id=photo_file_id)
     
+    # Удаляем сообщение с фото (опционально, для чистоты чата)
+    try:
+        await message.delete()
+    except:
+        pass
+    
     # Отправляем подтверждение получения фото
-    await message.answer("✅ Фото принято!")
+    confirm_msg = await message.answer("✅ Фото принято!")
     
     # Переходим к следующему шагу
-    await process_photo_complete(message, state)
+    await process_photo_complete(confirm_msg, state)
 
 
 # Обработчик кнопки "Прикрепить фото"
@@ -964,7 +972,7 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
         user = user_result.scalar_one_or_none()
         
         if not user:
-            await callback.message.edit_text("❌ Пользователь не найден")
+            await callback.answer("❌ Пользователь не найден")
             await state.clear()
             return
         
@@ -996,7 +1004,9 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
             "🕐 <i>Менеджер свяжется с вами в ближайшее время для уточнения деталей.</i>"
         )
         
-        await callback.message.edit_text(
+        # Удаляем предыдущее сообщение и отправляем новое
+        await callback.message.delete()
+        await callback.message.answer(
             success_text,
             parse_mode="HTML",
             reply_markup=get_main_kb()
@@ -1007,11 +1017,20 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         session.rollback()
         logging.error(f"Ошибка при сохранении заявки: {e}")
-        await callback.message.edit_text("❌ Ошибка при создании заявки")
+        await callback.answer("❌ Ошибка при создании заявки")
+        # Пытаемся отправить новое сообщение об ошибке
+        try:
+            await callback.message.answer(
+                "❌ Ошибка при создании заявки. Попробуйте снова.",
+                reply_markup=get_main_kb()
+            )
+        except:
+            pass  # Если и это не сработает, просто игнорируем
     finally:
         session.close()
         await state.clear()
     await callback.answer()
+    await notify_manager_about_new_request(callback.bot, new_request.id)
 
 
 # Обработчик отмены заявки

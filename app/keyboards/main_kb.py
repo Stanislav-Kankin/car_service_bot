@@ -143,3 +143,26 @@ def get_request_confirm_kb():
         InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request")
     )
     return builder.as_markup()
+
+
+# Клавиатура для менеджера (под каждой заявкой)
+def get_manager_request_kb(request_id: int):
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Принять", callback_data=f"manager_accept:{request_id}"),
+        InlineKeyboardButton(text="✏️ Уточнить", callback_data=f"manager_clarify:{request_id}")
+    )
+    builder.row(
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"manager_reject:{request_id}"),
+        InlineKeyboardButton(text="📞 Позвонить", callback_data=f"manager_call:{request_id}")
+    )
+    return builder.as_markup()
+
+
+# Клавиатура для отмены действия менеджером
+def get_manager_cancel_kb():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="❌ Отменить", callback_data="manager_cancel")
+    )
+    return builder.as_markup()

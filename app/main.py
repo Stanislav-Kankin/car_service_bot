@@ -8,7 +8,7 @@ from redis.asyncio import Redis
 
 from app.config import config
 from app.database import db
-from app.handlers import user_handlers
+from app.handlers import user_handlers, manager_handlers
 
 # Добавляем путь к корневой папке проекта
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,6 +38,7 @@ async def main():
 
         # Регистрация роутеров
         dp.include_router(user_handlers.router)
+        dp.include_router(manager_handlers.router)
 
         # Создание таблиц в БД (СИНХРОННО, без await!)
         db.create_tables()

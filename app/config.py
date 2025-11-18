@@ -21,6 +21,10 @@ class Config:
 
     REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379/0"
 
+    # Настройки менеджера (ДОБАВЛЯЕМ)
+    MANAGER_CHAT_ID = os.getenv("MANAGER_CHAT_ID")  # ID чата/группы менеджера
+    ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")  # ID пользователя администратора
+
     @classmethod
     def validate(cls):
         if not cls.BOT_TOKEN:
@@ -31,6 +35,10 @@ class Config:
             cls.DB_URL.replace(
                 '//', '//***:***@') if 'postgres' in cls.DB_URL else cls.DB_URL
             }")
+        
+        # Предупреждение если нет настроек менеджера
+        if not cls.MANAGER_CHAT_ID:
+            print("⚠️  MANAGER_CHAT_ID не установлен - уведомления менеджеру не будут отправляться")
 
 
 config = Config()
