@@ -4,10 +4,11 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 
 from app.database.models import User, Car, Request
-from app.database.db import SessionLocal
+from app.database.db import AsyncSessionLocal
 from app.keyboards.main_kb import get_manager_request_kb, get_manager_cancel_kb
 from app.config import config
 
@@ -146,58 +147,56 @@ async def process_manager_deadline(message: Message, state: FSMContext, bot: Bot
     request_id = user_data['request_id']
     price = user_data['price']
     
-    session = SessionLocal()
-    
-    try:
-        # Обновляем статус заявки
-        request_result = session.execute(select(Request).where(Request.id == request_id))
-        request = request_result.scalar_one_or_none()
-        
-        if not request:
-            await message.answer("❌ Заявка не найдена")
-            await state.clear()
-            return
-        
-        # Обновляем статус
-        request.status = 'accepted'
-        session.commit()
-        
-        # Получаем данные пользователя для уведомления
-        user_result = session.execute(select(User).where(User.id == request.user_id))
-        user = user_result.scalar_one_or_none()
-        
-        # Отправляем уведомление пользователю
-        if user:
-            user_message = (
-                "✅ <b>Ваша заявка принята!</b>\n\n"
-                f"📋 <b>Номер заявки:</b> #{request.id}\n"
-                f"💰 <b>Ориентировочная стоимость:</b> {price}\n"
-                f"⏰ <b>Ориентировочные сроки:</b> {deadline}\n\n"
-                f"📞 <b>Менеджер свяжется с вами для уточнения деталей.</b>"
-            )
+    async with AsyncSessionLocal() as session:
+        try:
+            # Обновляем статус заявки
+            request_result = await session.execute(select(Request).where(Request.id == request_id))
+            request = request_result.scalar_one_or_none()
             
-            await bot.send_message(
-                chat_id=user.telegram_id,
-                text=user_message,
+            if not request:
+                await message.answer("❌ Заявка не найдена")
+                await state.clear()
+                return
+            
+            # Обновляем статус
+            request.status = 'accepted'
+            await session.commit()
+            
+            # Получаем данные пользователя для уведомления
+            user_result = await session.execute(select(User).where(User.id == request.user_id))
+            user = user_result.scalar_one_or_none()
+            
+            # Отправляем уведомление пользователю
+            if user:
+                user_message = (
+                    "✅ <b>Ваша заявка принята!</b>\n\n"
+                    f"📋 <b>Номер заявки:</b> #{request.id}\n"
+                    f"💰 <b>Ориентировочная стоимость:</b> {price}\n"
+                    f"⏰ <b>Ориентировочные сроки:</b> {deadline}\n\n"
+                    f"📞 <b>Менеджер свяжется с вами для уточнения деталей.</b>"
+                )
+                
+                await bot.send_message(
+                    chat_id=user.telegram_id,
+                    text=user_message,
+                    parse_mode="HTML"
+                )
+            
+            # Обновляем сообщение у менеджера
+            await message.answer(
+                f"✅ Заявка #{request_id} принята!\n\n"
+                f"💰 <b>Стоимость:</b> {price}\n"
+                f"⏰ <b>Сроки:</b> {deadline}\n\n"
+                f"📞 Уведомление отправлено клиенту.",
                 parse_mode="HTML"
             )
-        
-        # Обновляем сообщение у менеджера
-        await message.answer(
-            f"✅ Заявка #{request_id} принята!\n\n"
-            f"💰 <b>Стоимость:</b> {price}\n"
-            f"⏰ <b>Сроки:</b> {deadline}\n\n"
-            f"📞 Уведомление отправлено клиенту.",
-            parse_mode="HTML"
-        )
-        
-    except Exception as e:
-        session.rollback()
-        logging.error(f"Ошибка при принятии заявки: {e}")
-        await message.answer("❌ Ошибка при принятии заявки")
-    finally:
-        session.close()
-        await state.clear()
+            
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"Ошибка при принятии заявки: {e}")
+            await message.answer("❌ Ошибка при принятии заявки")
+        finally:
+            await state.clear()
 
 
 # Обработчик отклонения заявки
@@ -233,56 +232,54 @@ async def process_reject_reason(message: Message, state: FSMContext, bot: Bot):
     user_data = await state.get_data()
     request_id = user_data['request_id']
     
-    session = SessionLocal()
-    
-    try:
-        # Обновляем статус заявки
-        request_result = session.execute(select(Request).where(Request.id == request_id))
-        request = request_result.scalar_one_or_none()
-        
-        if not request:
-            await message.answer("❌ Заявка не найдена")
-            await state.clear()
-            return
-        
-        # Обновляем статус
-        request.status = 'rejected'
-        session.commit()
-        
-        # Получаем данные пользователя для уведомления
-        user_result = session.execute(select(User).where(User.id == request.user_id))
-        user = user_result.scalar_one_or_none()
-        
-        # Отправляем уведомление пользователю
-        if user:
-            user_message = (
-                "❌ <b>Ваша заявка отклонена</b>\n\n"
-                f"📋 <b>Номер заявки:</b> #{request.id}\n"
-                f"📝 <b>Причина:</b> {reason}\n\n"
-                f"ℹ️ <b>Вы можете создать новую заявку с учетом замечаний.</b>"
-            )
+    async with AsyncSessionLocal() as session:
+        try:
+            # Обновляем статус заявки
+            request_result = await session.execute(select(Request).where(Request.id == request_id))
+            request = request_result.scalar_one_or_none()
             
-            await bot.send_message(
-                chat_id=user.telegram_id,
-                text=user_message,
+            if not request:
+                await message.answer("❌ Заявка не найдена")
+                await state.clear()
+                return
+            
+            # Обновляем статус
+            request.status = 'rejected'
+            await session.commit()
+            
+            # Получаем данные пользователя для уведомления
+            user_result = await session.execute(select(User).where(User.id == request.user_id))
+            user = user_result.scalar_one_or_none()
+            
+            # Отправляем уведомление пользователю
+            if user:
+                user_message = (
+                    "❌ <b>Ваша заявка отклонена</b>\n\n"
+                    f"📋 <b>Номер заявки:</b> #{request.id}\n"
+                    f"📝 <b>Причина:</b> {reason}\n\n"
+                    f"ℹ️ <b>Вы можете создать новую заявку с учетом замечаний.</b>"
+                )
+                
+                await bot.send_message(
+                    chat_id=user.telegram_id,
+                    text=user_message,
+                    parse_mode="HTML"
+                )
+            
+            # Обновляем сообщение у менеджера
+            await message.answer(
+                f"❌ Заявка #{request_id} отклонена!\n\n"
+                f"📝 <b>Причина:</b> {reason}\n\n"
+                f"ℹ️ Уведомление отправлено клиенту.",
                 parse_mode="HTML"
             )
-        
-        # Обновляем сообщение у менеджера
-        await message.answer(
-            f"❌ Заявка #{request_id} отклонена!\n\n"
-            f"📝 <b>Причина:</b> {reason}\n\n"
-            f"ℹ️ Уведомление отправлено клиенту.",
-            parse_mode="HTML"
-        )
-        
-    except Exception as e:
-        session.rollback()
-        logging.error(f"Ошибка при отклонении заявки: {e}")
-        await message.answer("❌ Ошибка при отклонении заявки")
-    finally:
-        session.close()
-        await state.clear()
+            
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"Ошибка при отклонении заявки: {e}")
+            await message.answer("❌ Ошибка при отклонении заявки")
+        finally:
+            await state.clear()
 
 
 # Обработчик уточнения заявки
@@ -318,54 +315,52 @@ async def process_clarification(message: Message, state: FSMContext, bot: Bot):
     user_data = await state.get_data()
     request_id = user_data['request_id']
     
-    session = SessionLocal()
-    
-    try:
-        # Получаем данные заявки и пользователя
-        request_result = session.execute(
-            select(Request, User)
-            .join(User, Request.user_id == User.id)
-            .where(Request.id == request_id)
-        )
-        result = request_result.first()
-        
-        if not result:
-            await message.answer("❌ Заявка не найдена")
+    async with AsyncSessionLocal() as session:
+        try:
+            # Получаем данные заявки и пользователя
+            request_result = await session.execute(
+                select(Request, User)
+                .join(User, Request.user_id == User.id)
+                .where(Request.id == request_id)
+            )
+            result = request_result.first()
+            
+            if not result:
+                await message.answer("❌ Заявка не найдена")
+                await state.clear()
+                return
+            
+            request, user = result
+            
+            # Отправляем уведомление пользователю
+            user_message = (
+                "✏️ <b>Уточнение по вашей заявке</b>\n\n"
+                f"📋 <b>Номер заявки:</b> #{request.id}\n"
+                f"🛠️ <b>Услуга:</b> {request.service_type}\n\n"
+                f"❓ <b>Менеджер уточняет:</b>\n{clarification}\n\n"
+                f"💬 <b>Пожалуйста, ответьте на этот вопрос.</b>"
+            )
+            
+            await bot.send_message(
+                chat_id=user.telegram_id,
+                text=user_message,
+                parse_mode="HTML"
+            )
+            
+            # Обновляем сообщение у менеджера
+            await message.answer(
+                f"✏️ Запрос на уточнение отправлен клиенту!\n\n"
+                f"📋 <b>Заявка:</b> #{request_id}\n"
+                f"👤 <b>Клиент:</b> {user.full_name}\n\n"
+                f"❓ <b>Ваш вопрос:</b>\n{clarification}",
+                parse_mode="HTML"
+            )
+            
+        except Exception as e:
+            logging.error(f"Ошибка при отправке уточнения: {e}")
+            await message.answer("❌ Ошибка при отправке уточнения")
+        finally:
             await state.clear()
-            return
-        
-        request, user = result
-        
-        # Отправляем уведомление пользователю
-        user_message = (
-            "✏️ <b>Уточнение по вашей заявке</b>\n\n"
-            f"📋 <b>Номер заявки:</b> #{request.id}\n"
-            f"🛠️ <b>Услуга:</b> {request.service_type}\n\n"
-            f"❓ <b>Менеджер уточняет:</b>\n{clarification}\n\n"
-            f"💬 <b>Пожалуйста, ответьте на этот вопрос.</b>"
-        )
-        
-        await bot.send_message(
-            chat_id=user.telegram_id,
-            text=user_message,
-            parse_mode="HTML"
-        )
-        
-        # Обновляем сообщение у менеджера
-        await message.answer(
-            f"✏️ Запрос на уточнение отправлен клиенту!\n\n"
-            f"📋 <b>Заявка:</b> #{request_id}\n"
-            f"👤 <b>Клиент:</b> {user.full_name}\n\n"
-            f"❓ <b>Ваш вопрос:</b>\n{clarification}",
-            parse_mode="HTML"
-        )
-        
-    except Exception as e:
-        logging.error(f"Ошибка при отправке уточнения: {e}")
-        await message.answer("❌ Ошибка при отправке уточнения")
-    finally:
-        session.close()
-        await state.clear()
 
 
 # Обработчик кнопки "Позвонить"
@@ -373,47 +368,44 @@ async def process_clarification(message: Message, state: FSMContext, bot: Bot):
 async def manager_call_client(callback: CallbackQuery):
     request_id = int(callback.data.split(":")[1])
     
-    session = SessionLocal()
-    
-    try:
-        # Получаем данные заявки и пользователя
-        request_result = session.execute(
-            select(Request, User)
-            .join(User, Request.user_id == User.id)
-            .where(Request.id == request_id)
-        )
-        result = request_result.first()
-        
-        if not result:
-            await callback.answer("❌ Заявка не найдена")
-            return
-        
-        request, user = result
-        
-        if not user.phone_number:
-            await callback.answer("❌ У клиента не указан номер телефона")
-            return
-        
-        # Показываем номер телефона
-        call_message = (
-            f"📞 <b>Контакт клиента</b>\n\n"
-            f"📋 <b>Заявка:</b> #{request.id}\n"
-            f"👤 <b>Клиент:</b> {user.full_name}\n"
-            f"📱 <b>Телефон:</b> {user.phone_number}\n\n"
-            f"🛠️ <b>Услуга:</b> {request.service_type}"
-        )
-        
-        await callback.message.answer(
-            call_message,
-            parse_mode="HTML"
-        )
-        await callback.answer()
-        
-    except Exception as e:
-        logging.error(f"Ошибка при получении контакта: {e}")
-        await callback.answer("❌ Ошибка при получении контакта")
-    finally:
-        session.close()
+    async with AsyncSessionLocal() as session:
+        try:
+            # Получаем данные заявки и пользователя
+            request_result = await session.execute(
+                select(Request, User)
+                .join(User, Request.user_id == User.id)
+                .where(Request.id == request_id)
+            )
+            result = request_result.first()
+            
+            if not result:
+                await callback.answer("❌ Заявка не найдена")
+                return
+            
+            request, user = result
+            
+            if not user.phone_number:
+                await callback.answer("❌ У клиента не указан номер телефона")
+                return
+            
+            # Показываем номер телефона
+            call_message = (
+                f"📞 <b>Контакт клиента</b>\n\n"
+                f"📋 <b>Заявка:</b> #{request.id}\n"
+                f"👤 <b>Клиент:</b> {user.full_name}\n"
+                f"📱 <b>Телефон:</b> {user.phone_number}\n\n"
+                f"🛠️ <b>Услуга:</b> {request.service_type}"
+            )
+            
+            await callback.message.answer(
+                call_message,
+                parse_mode="HTML"
+            )
+            await callback.answer()
+            
+        except Exception as e:
+            logging.error(f"Ошибка при получении контакта: {e}")
+            await callback.answer("❌ Ошибка при получении контакта")
 
 
 # Обработчик отмены действия менеджером

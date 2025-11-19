@@ -1,0 +1,72 @@
+import logging
+from aiogram import Bot
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.database.models import Request, User, Car
+from app.database.db import AsyncSessionLocal
+from app.keyboards.main_kb import get_manager_request_kb
+from app.config import config
+
+
+async def notify_manager_about_new_request(bot: Bot, request_id: int):
+    if not config.MANAGER_CHAT_ID:
+        logging.warning(
+            "MANAGER_CHAT_ID не установлен - уведомление не отправлено"
+            )
+        return
+
+    async with AsyncSessionLocal() as session:
+        try:
+            # Получаем данные заявки
+            request_result = await session.execute(
+                select(Request, User, Car)
+                .join(User, Request.user_id == User.id)
+                .join(Car, Request.car_id == Car.id)
+                .where(Request.id == request_id)
+            )
+            result = request_result.first()
+
+            if not result:
+                logging.error(f"Заявка #{request_id} не найдена")
+                return
+
+            request, user, car = result
+
+            # Формируем сообщение для менеджера
+            message_text = (
+                "🆕 <b>НОВАЯ ЗАЯВКА</b>\n\n"
+                f"📋 <b>№{request.id}</b>\n"
+                f"👤 <b>Клиент:</b> {user.full_name}\n"
+                f"📞 <b>Телефон:</b> {user.phone_number or 'Не указан'}\n"
+                f"🚗 <b>Автомобиль:</b> {car.brand} {car.model}\n"
+                f"🗓️ <b>Год:</b> {car.year or 'Не указан'}\n"
+                f"🚙 <b>Номер:</b> {car.license_plate or 'Не указан'}\n"
+                f"🛠️ <b>Услуга:</b> {request.service_type}\n"
+                f"📝 <b>Описание:</b> {request.description}\n"
+                f"🗓️ <b>Желаемая дата:</b> {request.preferred_date}\n"
+                f"⏰ <b>Создана:</b> {request.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+            )
+
+            # Отправляем сообщение менеджеру
+            if request.photo_file_id:
+                await bot.send_photo(
+                    chat_id=config.MANAGER_CHAT_ID,
+                    photo=request.photo_file_id,
+                    caption=message_text,
+                    parse_mode="HTML",
+                    reply_markup=get_manager_request_kb(request.id)
+                )
+            else:
+                await bot.send_message(
+                    chat_id=config.MANAGER_CHAT_ID,
+                    text=message_text,
+                    parse_mode="HTML",
+                    reply_markup=get_manager_request_kb(request.id)
+                )
+
+            logging.info(
+                f"Уведомление о заявке #{request_id} отправлено менеджеру")
+
+        except Exception as e:
+            logging.error(
+                f"Ошибка при отправке уведомления менеджеру: {e}")

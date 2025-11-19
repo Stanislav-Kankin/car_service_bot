@@ -1,11 +1,9 @@
 from sqlalchemy import (
     Column, Integer, String,
-    BigInteger, Text, DateTime, Boolean, ForeignKey
-    )
-from sqlalchemy.ext.declarative import declarative_base
+    BigInteger, Text, DateTime, ForeignKey
+)
 from sqlalchemy.sql import func
-
-Base = declarative_base()
+from app.database.base import Base  # ← Импортируем из base.py
 
 
 class User(Base):
@@ -22,8 +20,7 @@ class Car(Base):
     __tablename__ = 'cars'
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey(
-        'users.id', ondelete='CASCADE'), nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     brand = Column(String(100), nullable=False)
     model = Column(String(100), nullable=False)
     year = Column(Integer)
@@ -34,12 +31,8 @@ class Request(Base):
     __tablename__ = 'requests'
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey(
-        'users.id', ondelete='CASCADE'
-        ), nullable=False)
-    car_id = Column(Integer, ForeignKey(
-        'cars.id', ondelete='CASCADE'
-        ), nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    car_id = Column(Integer, ForeignKey('cars.id', ondelete='CASCADE'), nullable=False)
     service_type = Column(String(50), nullable=False)
     description = Column(Text)
     photo_file_id = Column(String(255))

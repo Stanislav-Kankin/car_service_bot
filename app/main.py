@@ -10,10 +10,6 @@ from app.config import config
 from app.database import db
 from app.handlers import user_handlers, manager_handlers
 
-# Добавляем путь к корневой папке проекта
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
 async def main():
     # Проверяем конфигурацию перед запуском
     try:
@@ -40,8 +36,8 @@ async def main():
         dp.include_router(user_handlers.router)
         dp.include_router(manager_handlers.router)
 
-        # Создание таблиц в БД (СИНХРОННО, без await!)
-        db.create_tables()
+        # Создание таблиц в БД (АСИНХРОННО с await!)
+        await db.create_tables()  # ← ДОБАВИТЬ AWAIT
         logging.info("Таблицы БД созданы/проверены")
 
         # Запуск поллинга
