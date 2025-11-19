@@ -1206,3 +1206,12 @@ async def handle_commands_during_fsm(message: Message, state: FSMContext):
             "Завершите ввод данных или нажмите кнопку 'Отменить'",
             parse_mode="HTML"
         )
+
+@router.callback_query(F.data == "manager_rejected")
+async def manager_rejected_requests(callback: CallbackQuery):
+    """Показать отклоненные заявки"""
+    if not await is_manager(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    await show_manager_requests_list(callback, filter_status="rejected")

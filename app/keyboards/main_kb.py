@@ -240,6 +240,9 @@ def get_manager_panel_kb():
     builder.row(
         InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_main_menu")
     )
+    builder.row(
+        InlineKeyboardButton(text="❌ Отклоненные", callback_data="manager_rejected")
+    )
     return builder.as_markup()
 
 # Клавиатура для заявки в панели менеджера
