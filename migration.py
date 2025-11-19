@@ -1,60 +1,34 @@
 import asyncio
 import logging
 from sqlalchemy import text
-from app.database.db import engine, AsyncSessionLocal
-from app.config import config
+from app.database.db import engines
 
-async def add_manager_comment_column():
-    """Добавляет столбец manager_comment в таблицу requests"""
-    async with AsyncSessionLocal() as session:
+async def migrate_database():
+    """Добавляет новые поля в таблицу requests"""
+    async with engine.begin() as conn:
         try:
-            # Проверяем, существует ли уже столбец
-            if config.DB_TYPE == "sqlite":
-                check_query = text("""
-                    PRAGMA table_info(requests)
-                """)
-            else:  # PostgreSQL
-                check_query = text("""
-                    SELECT column_name 
-                    FROM information_schema.columns 
-                    WHERE table_name = 'requests' AND column_name = 'manager_comment'
-                """)
+            # Проверяем существование полей
+            result = await conn.execute(text("PRAGMA table_info(requests)"))
+            existing_columns = [row[1] for row in result]
             
-            result = await session.execute(check_query)
-            columns = result.fetchall()
+            columns_to_add = [
+                'accepted_at',
+                'in_progress_at', 
+                'completed_at',
+                'rejected_at'
+            ]
             
-            column_exists = False
-            if config.DB_TYPE == "sqlite":
-                column_exists = any('manager_comment' in str(col) for col in columns)
-            else:
-                column_exists = len(columns) > 0
+            for column in columns_to_add:
+                if column not in existing_columns:
+                    await conn.execute(text(f"ALTER TABLE requests ADD COLUMN {column} DATETIME"))
+                    logging.info(f"✅ Добавлен столбец {column}")
             
-            if not column_exists:
-                # Добавляем столбец
-                if config.DB_TYPE == "sqlite":
-                    alter_query = text("""
-                        ALTER TABLE requests ADD COLUMN manager_comment TEXT
-                    """)
-                else:  # PostgreSQL
-                    alter_query = text("""
-                        ALTER TABLE requests ADD COLUMN manager_comment TEXT
-                    """)
-                
-                await session.execute(alter_query)
-                await session.commit()
-                logging.info("✅ Столбец manager_comment успешно добавлен в таблицу requests")
-            else:
-                logging.info("✅ Столбец manager_comment уже существует")
-                
+            logging.info("✅ Миграция базы данных завершена успешно")
+            
         except Exception as e:
-            logging.error(f"❌ Ошибка при добавлении столбца manager_comment: {e}")
-            await session.rollback()
-
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    logging.info("🔄 Запуск миграции...")
-    await add_manager_comment_column()
-    logging.info("✅ Миграция завершена")
+            logging.error(f"❌ Ошибка миграции БД: {e}")
+            raise
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(migrate_database())

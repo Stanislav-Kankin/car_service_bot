@@ -154,6 +154,7 @@ async def process_contact(message: Message, state: FSMContext):
 
             print("🔧 DEBUG: Пользователь сохранен в БД")
 
+            # УБИРАЕМ REPLY-КЛАВИАТУРУ и отправляем сообщение
             await message.answer(
                 f"✅ Регистрация завершена!\n\n"
                 f"👤 <b>Ваши данные:</b>\n"
@@ -161,8 +162,15 @@ async def process_contact(message: Message, state: FSMContext):
                 f"• Телефон: {contact.phone_number}\n\n"
                 "Теперь вы можете пользоваться всеми возможностями бота!",
                 parse_mode="HTML",
+                reply_markup=ReplyKeyboardRemove()  # ← ВОТ ЭТО УБИРАЕТ КЛАВИАТУРУ
+            )
+            
+            # Отправляем главное меню отдельным сообщением
+            await message.answer(
+                "Выберите действие:",
                 reply_markup=get_main_kb()
             )
+            
             await state.clear()
 
         except Exception as e:
@@ -170,7 +178,7 @@ async def process_contact(message: Message, state: FSMContext):
             print(f"❌ Ошибка при сохранении пользователя: {e}")
             await message.answer(
                 "❌ Ошибка при сохранении данных. Попробуйте снова: /start",
-                reply_markup=ReplyKeyboardRemove()
+                reply_markup=ReplyKeyboardRemove()  # ← И здесь тоже убираем при ошибке
             )
 
 
@@ -1586,29 +1594,6 @@ async def show_request_summary(message: Message, state: FSMContext):
             logging.error(f"Ошибка при показе сводки: {e}")
             await message.answer("❌ Ошибка при формировании заявки")
             await state.clear()
-
-
-@router.message(F.text & ~F.text.startswith('/'))
-async def handle_user_text_messages(message: Message, state: FSMContext):
-    """Обрабатывает только обычные текстовые сообщения (не команды)"""
-    try:
-        # Проверяем, есть ли активное состояние FSM
-        current_state = await state.get_state()
-        if current_state:
-            return  # Пусть FSM обрабатывает
-            
-        # Если пользователь просто пишет текст, показываем подсказку
-        await message.answer(
-            "🤔 Не понял ваше сообщение. Используйте кнопки меню для навигации.",
-            reply_markup=get_main_kb()
-        )
-                    
-    except Exception as e:
-        logging.error(f"❌ Ошибка обработки сообщения пользователя: {e}")
-        await message.answer(
-            "❌ Произошла ошибка. Попробуйте еще раз.",
-            reply_markup=get_main_kb()
-        )
 
 
 # Обработчик подтверждения заявки

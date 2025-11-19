@@ -41,3 +41,7 @@ class Request(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     manager_comment = Column(Text)
     chat_message_id = Column(Integer)
+    accepted_at = Column(DateTime(timezone=True))
+    in_progress_at = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+    rejected_at = Column(DateTime(timezone=True))

@@ -1,6 +1,5 @@
 from aiogram import Router, F, Bot
-from aiogram.types import CallbackQuery, Message
-from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardButton
 from sqlalchemy import select
 import logging
@@ -8,6 +7,8 @@ import logging
 from app.database.db import AsyncSessionLocal
 from app.database.models import Request, User
 from app.config import config
+
+from datetime import datetime
 
 router = Router()
 
@@ -62,9 +63,12 @@ async def accept_request(callback: CallbackQuery, request_id: int):
             
             request, user = result
             
-            # Обновляем статус
+            # Обновляем статус и время принятия
             request.status = 'accepted'
+            request.accepted_at = datetime.now()  # ← ВАЖНО: добавляем время
+            
             await session.commit()
+            logging.info(f"✅ Заявка #{request_id} принята в {request.accepted_at}")
 
             # Уведомляем пользователя
             user_message = (
@@ -81,8 +85,6 @@ async def accept_request(callback: CallbackQuery, request_id: int):
             )
 
             await callback.answer("✅ Заявка принята")
-            
-            # Обновляем клавиатуру в чате
             await update_chat_keyboard(callback.bot, request_id)
 
         except Exception as e:
@@ -95,7 +97,6 @@ async def reject_request(callback: CallbackQuery, request_id: int):
     """Отклонить заявку"""
     async with AsyncSessionLocal() as session:
         try:
-            # Получаем заявку и пользователя
             request_result = await session.execute(
                 select(Request, User).join(User, Request.user_id == User.id).where(Request.id == request_id)
             )
@@ -107,9 +108,12 @@ async def reject_request(callback: CallbackQuery, request_id: int):
             
             request, user = result
             
-            # Обновляем статус
+            # Обновляем статус и время отклонения
             request.status = 'rejected'
+            request.rejected_at = datetime.now()  # ← ВАЖНО: добавляем время
+            
             await session.commit()
+            logging.info(f"❌ Заявка #{request_id} отклонена в {request.rejected_at}")
 
             # Уведомляем пользователя
             user_message = (
@@ -126,8 +130,6 @@ async def reject_request(callback: CallbackQuery, request_id: int):
             )
 
             await callback.answer("❌ Заявка отклонена")
-            
-            # Обновляем клавиатуру в чате
             await update_chat_keyboard(callback.bot, request_id)
 
         except Exception as e:
@@ -140,7 +142,6 @@ async def set_in_progress(callback: CallbackQuery, request_id: int):
     """Взять заявку в работу"""
     async with AsyncSessionLocal() as session:
         try:
-            # Получаем заявку и пользователя
             request_result = await session.execute(
                 select(Request, User).join(User, Request.user_id == User.id).where(Request.id == request_id)
             )
@@ -152,9 +153,12 @@ async def set_in_progress(callback: CallbackQuery, request_id: int):
             
             request, user = result
             
-            # Обновляем статус
+            # Обновляем статус и время взятия в работу
             request.status = 'in_progress'
+            request.in_progress_at = datetime.now()  # ← ВАЖНО: добавляем время
+            
             await session.commit()
+            logging.info(f"⏳ Заявка #{request_id} взята в работу в {request.in_progress_at}")
 
             # Уведомляем пользователя
             user_message = (
@@ -171,8 +175,6 @@ async def set_in_progress(callback: CallbackQuery, request_id: int):
             )
 
             await callback.answer("✅ Заявка в работе")
-            
-            # Обновляем клавиатуру в чате
             await update_chat_keyboard(callback.bot, request_id)
 
         except Exception as e:
@@ -185,7 +187,6 @@ async def complete_request(callback: CallbackQuery, request_id: int):
     """Завершить заявку"""
     async with AsyncSessionLocal() as session:
         try:
-            # Получаем заявку и пользователя
             request_result = await session.execute(
                 select(Request, User).join(User, Request.user_id == User.id).where(Request.id == request_id)
             )
@@ -197,9 +198,12 @@ async def complete_request(callback: CallbackQuery, request_id: int):
             
             request, user = result
             
-            # Обновляем статус
+            # Обновляем статус и время завершения
             request.status = 'completed'
+            request.completed_at = datetime.now()  # ← ВАЖНО: добавляем время
+            
             await session.commit()
+            logging.info(f"🏁 Заявка #{request_id} завершена в {request.completed_at}")
 
             # Уведомляем пользователя
             user_message = (
@@ -217,8 +221,6 @@ async def complete_request(callback: CallbackQuery, request_id: int):
             )
 
             await callback.answer("✅ Заявка завершена")
-            
-            # Обновляем клавиатуру в чате
             await update_chat_keyboard(callback.bot, request_id)
 
         except Exception as e:
