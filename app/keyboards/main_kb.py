@@ -1,6 +1,6 @@
 from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton
+    InlineKeyboardButton,
+    KeyboardButton
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
@@ -165,4 +165,115 @@ def get_manager_cancel_kb():
     builder.row(
         InlineKeyboardButton(text="❌ Отменить", callback_data="manager_cancel")
     )
+    return builder.as_markup()
+
+
+# Клавиатура для истории заявок
+def get_history_kb():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🆕 Новые", callback_data="filter_new"),
+        InlineKeyboardButton(text="✅ Принятые", callback_data="filter_accepted"),
+        InlineKeyboardButton(text="⏳ В работе", callback_data="filter_in_progress")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📋 Все заявки", callback_data="filter_all"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")
+    )
+    return builder.as_markup()
+
+
+# Клавиатура для детального просмотра заявки
+def get_request_detail_kb(request_id: int, back_to: str = "history"):
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=back_to),
+        InlineKeyboardButton(text="📋 К списку", callback_data="request_history")
+    )
+    return builder.as_markup()
+
+
+# Клавиатура для навигации по заявкам
+def get_requests_navigation_kb(requests_ids: list, current_index: int, back_to: str = "history"):
+    builder = InlineKeyboardBuilder()
+    
+    if current_index > 0:
+        builder.row(
+            InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"view_request:{requests_ids[current_index - 1]}")
+        )
+    
+    builder.row(
+        InlineKeyboardButton(text="📋 К списку", callback_data="request_history")
+    )
+    
+    if current_index < len(requests_ids) - 1:
+        builder.row(
+            InlineKeyboardButton(text="Следующая ➡️", callback_data=f"view_request:{requests_ids[current_index + 1]}")
+        )
+    
+    return builder.as_markup()
+
+
+# Клавиатура для отмены редактирования авто
+def get_edit_cancel_kb(car_id: int):
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="❌ Отменить редактирование", callback_data=f"cancel_edit:{car_id}")
+    )
+    return builder.as_markup()
+
+# Клавиатура панели менеджера
+def get_manager_panel_kb():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📋 Все заявки", callback_data="manager_all_requests"),
+        InlineKeyboardButton(text="🆕 Новые", callback_data="manager_new_requests")
+    )
+    builder.row(
+        InlineKeyboardButton(text="⏳ В работе", callback_data="manager_in_progress"),
+        InlineKeyboardButton(text="✅ Завершенные", callback_data="manager_completed")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📊 Статистика", callback_data="manager_stats"),
+        InlineKeyboardButton(text="🔍 Поиск", callback_data="manager_search")
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_main_menu")
+    )
+    return builder.as_markup()
+
+# Клавиатура для заявки в панели менеджера
+def get_manager_request_detail_kb(request_id: int):
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="⏳ В работу", callback_data=f"manager_set_in_progress:{request_id}"),
+        InlineKeyboardButton(text="✅ Завершить", callback_data=f"manager_set_completed:{request_id}")
+    )
+    builder.row(
+        InlineKeyboardButton(text="✏️ Комментарий", callback_data=f"manager_add_comment:{request_id}"),
+        InlineKeyboardButton(text="📞 Позвонить", callback_data=f"manager_call:{request_id}")
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_all_requests")
+    )
+    return builder.as_markup()
+
+# Клавиатура навигации по заявкам для менеджера
+def get_manager_requests_navigation_kb(requests_ids: list, current_index: int):
+    builder = InlineKeyboardBuilder()
+    
+    if current_index > 0:
+        builder.row(
+            InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"manager_view_request:{requests_ids[current_index - 1]}")
+        )
+    
+    builder.row(
+        InlineKeyboardButton(text="📋 К списку", callback_data="manager_all_requests")
+    )
+    
+    if current_index < len(requests_ids) - 1:
+        builder.row(
+            InlineKeyboardButton(text="Следующая ➡️", callback_data=f"manager_view_request:{requests_ids[current_index + 1]}")
+        )
+    
     return builder.as_markup()

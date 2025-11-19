@@ -12,7 +12,7 @@ async def notify_manager_about_new_request(bot: Bot, request_id: int):
     if not config.MANAGER_CHAT_ID:
         logging.warning(
             "MANAGER_CHAT_ID не установлен - уведомление не отправлено"
-            )
+        )
         return
 
     async with AsyncSessionLocal() as session:
@@ -47,16 +47,38 @@ async def notify_manager_about_new_request(bot: Bot, request_id: int):
                 f"⏰ <b>Создана:</b> {request.created_at.strftime('%d.%m.%Y %H:%M')}\n"
             )
 
-            # Отправляем сообщение менеджеру
+            # Проверяем тип медиа (фото или видео)
             if request.photo_file_id:
-                await bot.send_photo(
-                    chat_id=config.MANAGER_CHAT_ID,
-                    photo=request.photo_file_id,
-                    caption=message_text,
-                    parse_mode="HTML",
-                    reply_markup=get_manager_request_kb(request.id)
-                )
+                try:
+                    # Пытаемся отправить как фото
+                    await bot.send_photo(
+                        chat_id=config.MANAGER_CHAT_ID,
+                        photo=request.photo_file_id,
+                        caption=message_text,
+                        parse_mode="HTML",
+                        reply_markup=get_manager_request_kb(request.id)
+                    )
+                except Exception as photo_error:
+                    # Если не получилось как фото, пробуем как видео
+                    try:
+                        await bot.send_video(
+                            chat_id=config.MANAGER_CHAT_ID,
+                            video=request.photo_file_id,
+                            caption=message_text,
+                            parse_mode="HTML",
+                            reply_markup=get_manager_request_kb(request.id)
+                        )
+                    except Exception as video_error:
+                        # Если и видео не получилось, отправляем только текст
+                        logging.warning(f"Не удалось отправить медиа: {photo_error}, {video_error}")
+                        await bot.send_message(
+                            chat_id=config.MANAGER_CHAT_ID,
+                            text=message_text + f"\n\n📎 <b>Медиафайл:</b> Не удалось отобразить",
+                            parse_mode="HTML",
+                            reply_markup=get_manager_request_kb(request.id)
+                        )
             else:
+                # Без медиа
                 await bot.send_message(
                     chat_id=config.MANAGER_CHAT_ID,
                     text=message_text,
@@ -64,9 +86,7 @@ async def notify_manager_about_new_request(bot: Bot, request_id: int):
                     reply_markup=get_manager_request_kb(request.id)
                 )
 
-            logging.info(
-                f"Уведомление о заявке #{request_id} отправлено менеджеру")
+            logging.info(f"Уведомление о заявке #{request_id} отправлено менеджеру")
 
         except Exception as e:
-            logging.error(
-                f"Ошибка при отправке уведомления менеджеру: {e}")
+            logging.error(f"Ошибка при отправке уведомления менеджеру: {e}")

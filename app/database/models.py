@@ -39,3 +39,4 @@ class Request(Base):
     preferred_date = Column(String(100))
     status = Column(String(50), default='new')
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    manager_comment = Column(Text)
