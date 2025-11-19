@@ -3,7 +3,6 @@ from aiogram import Bot
 from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardButton
 from sqlalchemy import select
 from app.database.models import Request, User, Car
-from app.database.comment_models import Comment
 from app.database.db import AsyncSessionLocal
 from app.config import config
 
@@ -27,16 +26,15 @@ async def create_request_chat(bot: Bot, request_id: int):
 
             request, user, car = result
 
-            # Формируем сообщение с кнопками управления
+            # Формируем сообщение
             message_text = (
-                "💬 <b>ЧАТ ПО ЗАЯВКЕ #{}</b>\n\n"
+                "💬 <b>ЗАЯВКА #{}</b>\n\n"
                 "👤 <b>Клиент:</b> {}\n"
                 "📞 <b>Телефон:</b> {}\n"
                 "🚗 <b>Автомобиль:</b> {} {}\n"
                 "🛠️ <b>Услуга:</b> {}\n"
                 "📝 <b>Описание:</b> {}\n"
-                "📊 <b>Статус:</b> {}\n\n"
-                "💭 <i>Отправляйте сообщения в этот чат для общения с клиентом</i>"
+                "📊 <b>Статус:</b> {}"
             ).format(
                 request.id,
                 user.full_name,
@@ -44,23 +42,33 @@ async def create_request_chat(bot: Bot, request_id: int):
                 car.brand, car.model,
                 request.service_type,
                 request.description,
-                "🆕 Новая" if request.status == 'new' else "✅ Принята"
+                "🆕 Новая" if request.status == 'new' else 
+                "✅ Принята" if request.status == 'accepted' else
+                "⏳ В работе" if request.status == 'in_progress' else
+                "✅ Завершена" if request.status == 'completed' else
+                "❌ Отклонена"
             )
 
             # Создаем клавиатуру
             builder = InlineKeyboardBuilder()
-            builder.row(
-                InlineKeyboardButton(text="✅ Принять заявку", callback_data=f"chat_accept:{request.id}"),
-                InlineKeyboardButton(text="💰 Указать стоимость", callback_data=f"chat_price:{request.id}")
-            )
-            builder.row(
-                InlineKeyboardButton(text="❓ Задать вопрос", callback_data=f"chat_question:{request.id}"),
-                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"chat_reject:{request.id}")
-            )
-            builder.row(
-                InlineKeyboardButton(text="⏳ Взять в работу", callback_data=f"chat_in_progress:{request.id}"),
-                InlineKeyboardButton(text="✅ Завершить", callback_data=f"chat_complete:{request.id}")
-            )
+            
+            if request.status == 'new':
+                builder.row(
+                    InlineKeyboardButton(text="✅ Принять", callback_data=f"chat_accept:{request.id}"),
+                    InlineKeyboardButton(text="⏳ В работу", callback_data=f"chat_in_progress:{request.id}")
+                )
+                builder.row(
+                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"chat_reject:{request.id}")
+                )
+            elif request.status == 'accepted':
+                builder.row(
+                    InlineKeyboardButton(text="⏳ В работу", callback_data=f"chat_in_progress:{request.id}"),
+                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"chat_reject:{request.id}")
+                )
+            elif request.status == 'in_progress':
+                builder.row(
+                    InlineKeyboardButton(text="✅ Завершить", callback_data=f"chat_complete:{request.id}"),
+                )
 
             # Отправляем в группу
             if request.photo_file_id:
@@ -96,47 +104,3 @@ async def create_request_chat(bot: Bot, request_id: int):
 
         except Exception as e:
             logging.error(f"❌ Ошибка создания чата: {e}")
-
-
-async def add_message_to_chat(bot: Bot, request_id: int, user_name: str, message: str, is_manager: bool = False):
-    """Добавляет сообщение в чат заявки"""
-    async with AsyncSessionLocal() as session:
-        try:
-            # Получаем заявку
-            request_result = await session.execute(
-                select(Request).where(Request.id == request_id)
-            )
-            request = request_result.scalar_one_or_none()
-
-            if not request or not request.chat_message_id:
-                logging.error(f"Чат для заявки #{request_id} не найден")
-                return
-
-            # Формируем сообщение
-            sender = "👨‍💼 Менеджер" if is_manager else "👤 Клиент"
-            message_text = f"{sender} <b>{user_name}:</b>\n{message}"
-
-            # Отправляем в чат
-            await bot.send_message(
-                chat_id=config.MANAGER_CHAT_ID,
-                text=message_text,
-                parse_mode="HTML",
-                reply_to_message_id=request.chat_message_id
-            )
-
-            # Сохраняем в комментарии
-            from app.services.comment_service import add_comment
-            
-            # Получаем ID пользователя
-            user_result = await session.execute(
-                select(User).where(User.telegram_id == (config.ADMIN_USER_ID if is_manager else request.user_id))
-            )
-            user = user_result.scalar_one_or_none()
-
-            if user:
-                await add_comment(request_id, user.id, message, is_manager)
-
-            logging.info(f"✅ Сообщение добавлено в чат заявки #{request_id}")
-
-        except Exception as e:
-            logging.error(f"❌ Ошибка добавления сообщения в чат: {e}")

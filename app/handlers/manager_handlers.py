@@ -19,9 +19,6 @@ from app.config import config
 
 router = Router()
 
-router.callback_query.filter()
-router.message.filter()
-
 
 class ManagerForm(StatesGroup):
     waiting_for_price = State()

@@ -1588,6 +1588,29 @@ async def show_request_summary(message: Message, state: FSMContext):
             await state.clear()
 
 
+@router.message(F.text & ~F.text.startswith('/'))
+async def handle_user_text_messages(message: Message, state: FSMContext):
+    """Обрабатывает только обычные текстовые сообщения (не команды)"""
+    try:
+        # Проверяем, есть ли активное состояние FSM
+        current_state = await state.get_state()
+        if current_state:
+            return  # Пусть FSM обрабатывает
+            
+        # Если пользователь просто пишет текст, показываем подсказку
+        await message.answer(
+            "🤔 Не понял ваше сообщение. Используйте кнопки меню для навигации.",
+            reply_markup=get_main_kb()
+        )
+                    
+    except Exception as e:
+        logging.error(f"❌ Ошибка обработки сообщения пользователя: {e}")
+        await message.answer(
+            "❌ Произошла ошибка. Попробуйте еще раз.",
+            reply_markup=get_main_kb()
+        )
+
+
 # Обработчик подтверждения заявки
 @router.callback_query(F.data == "confirm_request", RequestForm.confirm)
 async def confirm_request(callback: CallbackQuery, state: FSMContext):
