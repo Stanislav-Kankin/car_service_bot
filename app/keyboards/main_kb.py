@@ -280,3 +280,4 @@ def get_manager_requests_navigation_kb(requests_ids: list, current_index: int):
         )
     
     return builder.as_markup()
+

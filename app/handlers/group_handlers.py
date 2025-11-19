@@ -6,110 +6,71 @@ import logging
 
 from app.database.db import AsyncSessionLocal
 from app.database.models import Request, User
-from app.keyboards.main_kb import get_manager_cancel_kb
-from app.handlers.manager_handlers import is_manager, ManagerForm
+from app.handlers.manager_handlers import is_manager
 
 router = Router()
+
 
 # Обработчик callback'ов из групп
 @router.callback_query(F.data.startswith("manager_"))
 async def handle_group_callbacks(callback: CallbackQuery, state: FSMContext):
     """Обработчик callback'ов из групп"""
     try:
-        logging.info(f"🔔 Callback из группы получен!")
-        logging.info(f"🔔 Данные: {callback.data}")
-        logging.info(f"🔔 Пользователь: {callback.from_user.id}")
-        logging.info(f"🔔 Чат: {callback.message.chat.id}")
+        logging.info(f"🔔 Callback из группы: {callback.data} от пользователя {callback.from_user.id}")
         
         # Проверяем права пользователя
-        is_manager_user = await is_manager(callback.from_user.id)
-        logging.info(f"🔔 Результат проверки прав: {is_manager_user}")
-        
-        if not is_manager_user:
+        if not await is_manager(callback.from_user.id):
             await callback.answer("❌ У вас нет прав для управления заявками", show_alert=True)
             return
         
         # Обрабатываем разные типы callback'ов
         if callback.data.startswith("manager_accept:"):
-            request_id = int(callback.data.split(":")[1])
-            logging.info(f"🔔 Обработка принятия заявки #{request_id}")
-            await process_manager_accept(callback, state, request_id)
-            
-        elif callback.data.startswith("manager_clarify:"):
-            request_id = int(callback.data.split(":")[1])
-            logging.info(f"🔔 Обработка уточнения заявки #{request_id}")
-            await process_manager_clarify(callback, state, request_id)
+            await process_manager_accept(callback, state)
             
         elif callback.data.startswith("manager_reject:"):
-            request_id = int(callback.data.split(":")[1])
-            logging.info(f"🔔 Обработка отклонения заявки #{request_id}")
-            await process_manager_reject(callback, state, request_id)
+            await process_manager_reject(callback, state)
             
         elif callback.data.startswith("manager_call:"):
             request_id = int(callback.data.split(":")[1])
-            logging.info(f"🔔 Обработка звонка заявки #{request_id}")
             await process_manager_call(callback, request_id)
             
         else:
-            logging.warning(f"🔔 Неизвестный callback: {callback.data}")
             await callback.answer("⚠️ Действие не распознано")
             
     except Exception as e:
         logging.error(f"❌ Ошибка обработки callback из группы: {e}")
         await callback.answer("❌ Произошла ошибка", show_alert=True)
 
-async def process_manager_accept(callback: CallbackQuery, state: FSMContext, request_id: int):
+
+async def process_manager_accept(callback: CallbackQuery, state: FSMContext):
     """Обработка принятия заявки из группы"""
     try:
-        logging.info(f"🔔 Начало process_manager_accept для заявки #{request_id}")
+        request_id = int(callback.data.split(":")[1])
+        logging.info(f"🔔 Обработка принятия заявки #{request_id}")
         
-        await state.update_data(request_id=request_id)
-        
-        logging.info(f"🔔 Состояние установлено, отправка сообщения...")
-        
-        await callback.message.answer(
-            f"✅ Принятие заявки #{request_id}\n\n"
-            "Введите ориентировочную стоимость услуги:\n\n"
-            "<i>Пример: 5000 руб, 15000 руб, бесплатно по гарантии</i>",
-            parse_mode="HTML",
-            reply_markup=get_manager_cancel_kb()
-        )
-        await state.set_state(ManagerForm.waiting_for_price)
-        await callback.answer("✅ Введите стоимость")
-        
-        logging.info(f"🔔 Сообщение отправлено, состояние: {await state.get_state()}")
+        # Используем функцию из chat_handlers
+        from app.handlers.chat_handlers import accept_request
+        await accept_request(callback, request_id)
         
     except Exception as e:
         logging.error(f"❌ Ошибка в process_manager_accept: {e}")
         await callback.answer("❌ Ошибка при обработке")
 
-async def process_manager_clarify(callback: CallbackQuery, state: FSMContext, request_id: int):
-    """Обработка уточнения заявки из группы"""
-    await state.update_data(request_id=request_id)
-    
-    await callback.message.answer(
-        f"✏️ Уточнение заявки #{request_id}\n\n"
-        "Что нужно уточнить у клиента?\n\n"
-        "<i>Пример: Уточните VIN код, В какое время вам удобно, Какой именно звук издает двигатель?</i>",
-        parse_mode="HTML",
-        reply_markup=get_manager_cancel_kb()
-    )
-    await state.set_state(ManagerForm.waiting_for_clarification)
-    await callback.answer()
 
-async def process_manager_reject(callback: CallbackQuery, state: FSMContext, request_id: int):
+async def process_manager_reject(callback: CallbackQuery, state: FSMContext):
     """Обработка отклонения заявки из группы"""
-    await state.update_data(request_id=request_id)
-    
-    await callback.message.answer(
-        f"❌ Отклонение заявки #{request_id}\n\n"
-        "Укажите причину отклонения:\n\n"
-        "<i>Пример: Нет запчастей, не обслуживаем эту марку, несоответствие требованиям</i>",
-        parse_mode="HTML",
-        reply_markup=get_manager_cancel_kb()
-    )
-    await state.set_state(ManagerForm.waiting_for_reject_reason)
-    await callback.answer()
+    try:
+        request_id = int(callback.data.split(":")[1])
+        logging.info(f"🔔 Обработка отклонения заявки #{request_id}")
+        
+        # Используем функцию из chat_handlers
+        from app.handlers.chat_handlers import reject_request
+        await reject_request(callback, request_id)
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка в process_manager_reject: {e}")
+        await callback.answer("❌ Ошибка при обработке")
+
 
 async def process_manager_call(callback: CallbackQuery, request_id: int):
     """Обработка кнопки звонка из группы"""
