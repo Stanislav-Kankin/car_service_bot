@@ -1546,19 +1546,33 @@ async def show_request_summary(message: Message, state: FSMContext):
             )
             
             if user_data.get('photo_file_id'):
-                summary_text += f"📷 <b>Фото:</b> Прикреплено ✅\n"
-            else:
-                summary_text += f"📷 <b>Фото:</b> Нет\n"
-            
-            summary_text += "\nВсё верно? Отправляем заявку менеджеру?"
-            
-            if user_data.get('photo_file_id'):
-                await message.answer_photo(
-                    photo=user_data['photo_file_id'],
-                    caption=summary_text,
-                    parse_mode="HTML",
-                    reply_markup=get_request_confirm_kb()
-                )
+                # Проверяем тип медиа - отправляем отдельно от текста
+                try:
+                    # Пытаемся отправить как фото
+                    await message.answer_photo(
+                        photo=user_data['photo_file_id'],
+                        caption=summary_text,
+                        parse_mode="HTML",
+                        reply_markup=get_request_confirm_kb()
+                    )
+                except Exception as photo_error:
+                    # Если не фото, пробуем как видео
+                    try:
+                        await message.answer_video(
+                            video=user_data['photo_file_id'],
+                            caption=summary_text,
+                            parse_mode="HTML",
+                            reply_markup=get_request_confirm_kb()
+                        )
+                    except Exception as video_error:
+                        # Если и видео не получилось, отправляем только текст
+                        logging.warning(f"Не удалось отправить медиа в сводке: {photo_error}, {video_error}")
+                        summary_text += f"\n📎 <b>Медиафайл:</b> Прикреплен (не удалось отобразить)\n"
+                        await message.answer(
+                            summary_text,
+                            parse_mode="HTML",
+                            reply_markup=get_request_confirm_kb()
+                        )
             else:
                 await message.answer(
                     summary_text,

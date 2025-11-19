@@ -10,9 +10,7 @@ from app.config import config
 
 async def notify_manager_about_new_request(bot: Bot, request_id: int):
     if not config.MANAGER_CHAT_ID:
-        logging.warning(
-            "MANAGER_CHAT_ID не установлен - уведомление не отправлено"
-        )
+        logging.warning("MANAGER_CHAT_ID не установлен - уведомление не отправлено")
         return
 
     async with AsyncSessionLocal() as session:
@@ -47,46 +45,62 @@ async def notify_manager_about_new_request(bot: Bot, request_id: int):
                 f"⏰ <b>Создана:</b> {request.created_at.strftime('%d.%m.%Y %H:%M')}\n"
             )
 
-            # Проверяем тип медиа (фото или видео)
-            if request.photo_file_id:
-                try:
-                    # Пытаемся отправить как фото
-                    await bot.send_photo(
-                        chat_id=config.MANAGER_CHAT_ID,
-                        photo=request.photo_file_id,
-                        caption=message_text,
-                        parse_mode="HTML",
-                        reply_markup=get_manager_request_kb(request.id)
-                    )
-                except Exception as photo_error:
-                    # Если не получилось как фото, пробуем как видео
+            # ОТПРАВЛЯЕМ В ГРУППУ С КНОПКАМИ
+            try:
+                if request.photo_file_id:
                     try:
-                        await bot.send_video(
+                        # Пытаемся отправить как фото
+                        await bot.send_photo(
                             chat_id=config.MANAGER_CHAT_ID,
-                            video=request.photo_file_id,
+                            photo=request.photo_file_id,
                             caption=message_text,
                             parse_mode="HTML",
                             reply_markup=get_manager_request_kb(request.id)
                         )
-                    except Exception as video_error:
-                        # Если и видео не получилось, отправляем только текст
-                        logging.warning(f"Не удалось отправить медиа: {photo_error}, {video_error}")
+                    except Exception as photo_error:
+                        # Если не фото, пробуем как видео
+                        try:
+                            await bot.send_video(
+                                chat_id=config.MANAGER_CHAT_ID,
+                                video=request.photo_file_id,
+                                caption=message_text,
+                                parse_mode="HTML",
+                                reply_markup=get_manager_request_kb(request.id)
+                            )
+                        except Exception as video_error:
+                            # Если и видео не получилось, отправляем только текст
+                            logging.warning(f"Не удалось отправить медиа в группу: {photo_error}, {video_error}")
+                            await bot.send_message(
+                                chat_id=config.MANAGER_CHAT_ID,
+                                text=message_text + f"\n\n📎 <b>Медиафайл:</b> Не удалось отобразить",
+                                parse_mode="HTML",
+                                reply_markup=get_manager_request_kb(request.id)
+                            )
+                else:
+                    await bot.send_message(
+                        chat_id=config.MANAGER_CHAT_ID,
+                        text=message_text,
+                        parse_mode="HTML",
+                        reply_markup=get_manager_request_kb(request.id)
+                    )
+                
+                logging.info(f"✅ Уведомление о заявке #{request_id} отправлено в группу")
+                
+            except Exception as group_error:
+                logging.error(f"❌ Ошибка отправки в группу: {group_error}")
+                
+                # Пробуем отправить в личные сообщения как запасной вариант
+                try:
+                    if config.ADMIN_USER_ID:
                         await bot.send_message(
-                            chat_id=config.MANAGER_CHAT_ID,
-                            text=message_text + f"\n\n📎 <b>Медиафайл:</b> Не удалось отобразить",
+                            chat_id=config.ADMIN_USER_ID,
+                            text=f"❌ Не удалось отправить в группу. Заявка #{request_id}\n\n{message_text}",
                             parse_mode="HTML",
                             reply_markup=get_manager_request_kb(request.id)
                         )
-            else:
-                # Без медиа
-                await bot.send_message(
-                    chat_id=config.MANAGER_CHAT_ID,
-                    text=message_text,
-                    parse_mode="HTML",
-                    reply_markup=get_manager_request_kb(request.id)
-                )
-
-            logging.info(f"Уведомление о заявке #{request_id} отправлено менеджеру")
+                        logging.info(f"✅ Уведомление о заявке #{request_id} отправлено в личные сообщения")
+                except Exception as pm_error:
+                    logging.error(f"❌ Ошибка отправки в личные сообщения: {pm_error}")
 
         except Exception as e:
-            logging.error(f"Ошибка при отправке уведомления менеджеру: {e}")
+            logging.error(f"❌ Общая ошибка при отправке уведомления: {e}")

@@ -19,6 +19,9 @@ from app.config import config
 
 router = Router()
 
+router.callback_query.filter()
+router.message.filter()
+
 
 class ManagerForm(StatesGroup):
     waiting_for_price = State()
@@ -94,25 +97,34 @@ async def notify_manager_about_new_request(bot: Bot, request_id: int):
 # Обработчик принятия заявки менеджером
 @router.callback_query(F.data.startswith("manager_accept:"))
 async def manager_accept_request(callback: CallbackQuery, state: FSMContext):
+    if not await is_manager(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+        
     request_id = int(callback.data.split(":")[1])
     
     await state.update_data(request_id=request_id)
     
-    await callback.message.edit_text(
+    # Используем безопасную функцию
+    await safe_manager_reply(
+        callback,
         f"✅ Принятие заявки #{request_id}\n\n"
         "Введите ориентировочную стоимость услуги:\n\n"
         "<i>Пример: 5000 руб, 15000 руб, бесплатно по гарантии</i>",
-        parse_mode="HTML",
-        reply_markup=get_manager_cancel_kb()
+        get_manager_cancel_kb()
     )
     await state.set_state(ManagerForm.waiting_for_price)
-    await callback.answer()
 
 
 # Обработчик ввода цены
-@router.message(ManagerForm.waiting_for_price)
+@router.message(ManagerForm.waiting_for_price, ~F.text.startswith('/'))
 async def process_manager_price(message: Message, state: FSMContext):
     price = message.text.strip()
+    
+    # Если это команда - игнорируем
+    if price.startswith('/'):
+        await message.answer("❌ Пожалуйста, введите стоимость, а не команду")
+        return
     
     if len(price) < 2:
         await message.answer(
@@ -136,10 +148,15 @@ async def process_manager_price(message: Message, state: FSMContext):
     await state.set_state(ManagerForm.waiting_for_deadline)
 
 
-# Обработчик ввода сроков
-@router.message(ManagerForm.waiting_for_deadline)
+# Обработчик ввода сроков - УБЕРИТЕ bot: Bot из параметров
+@router.message(ManagerForm.waiting_for_deadline, ~F.text.startswith('/'))
 async def process_manager_deadline(message: Message, state: FSMContext):
     deadline = message.text.strip()
+    
+    # Если это команда - игнорируем
+    if deadline.startswith('/'):
+        await message.answer("❌ Пожалуйста, введите сроки, а не команду")
+        return
     
     if len(deadline) < 2:
         await message.answer(
@@ -207,19 +224,23 @@ async def process_manager_deadline(message: Message, state: FSMContext):
 # Обработчик отклонения заявки
 @router.callback_query(F.data.startswith("manager_reject:"))
 async def manager_reject_request(callback: CallbackQuery, state: FSMContext):
+    if not await is_manager(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+        
     request_id = int(callback.data.split(":")[1])
     
     await state.update_data(request_id=request_id)
     
-    await callback.message.edit_text(
+    # Используем безопасную функцию
+    await safe_manager_reply(
+        callback,
         f"❌ Отклонение заявки #{request_id}\n\n"
         "Укажите причину отклонения:\n\n"
         "<i>Пример: Нет запчастей, не обслуживаем эту марку, несоответствие требованиям</i>",
-        parse_mode="HTML",
-        reply_markup=get_manager_cancel_kb()
+        get_manager_cancel_kb()
     )
     await state.set_state(ManagerForm.waiting_for_reject_reason)
-    await callback.answer()
 
 
 # Обработчик ввода причины отклонения
@@ -290,25 +311,34 @@ async def process_reject_reason(message: Message, state: FSMContext):
 # Обработчик уточнения заявки
 @router.callback_query(F.data.startswith("manager_clarify:"))
 async def manager_clarify_request(callback: CallbackQuery, state: FSMContext):
+    if not await is_manager(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+        
     request_id = int(callback.data.split(":")[1])
     
     await state.update_data(request_id=request_id)
     
-    await callback.message.edit_text(
+    # Используем безопасную функцию
+    await safe_manager_reply(
+        callback,
         f"✏️ Уточнение заявки #{request_id}\n\n"
         "Что нужно уточнить у клиента?\n\n"
         "<i>Пример: Уточните VIN код, В какое время вам удобно, Какой именно звук издает двигатель?</i>",
-        parse_mode="HTML",
-        reply_markup=get_manager_cancel_kb()
+        get_manager_cancel_kb()
     )
     await state.set_state(ManagerForm.waiting_for_clarification)
-    await callback.answer()
 
 
-# Обработчик ввода уточнения
-@router.message(ManagerForm.waiting_for_clarification)
+# Обработчик ввода уточнения - УБЕРИТЕ bot: Bot из параметров
+@router.message(ManagerForm.waiting_for_clarification, ~F.text.startswith('/'))
 async def process_clarification(message: Message, state: FSMContext):
     clarification = message.text.strip()
+    
+    # Если это команда - игнорируем
+    if clarification.startswith('/'):
+        await message.answer("❌ Пожалуйста, введите вопрос для уточнения, а не команду")
+        return
     
     if len(clarification) < 5:
         await message.answer(
@@ -440,19 +470,29 @@ async def cmd_manager(message: Message):
 # Функция проверки прав менеджера
 async def is_manager(telegram_id: int) -> bool:
     """Проверяет, является ли пользователь менеджером"""
-    # Проверяем по ID из конфига или по специальной роли в БД
+    logging.info(f"🔧 Проверка прав для пользователя {telegram_id}")
+    
+    # Проверяем по ID из конфига
     if str(telegram_id) == config.ADMIN_USER_ID:
+        logging.info(f"✅ Пользователь {telegram_id} является администратором")
         return True
     
-    # Можно добавить дополнительную проверку по БД
+    # Дополнительная проверка по БД
     async with AsyncSessionLocal() as session:
-        user_result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
-        )
-        user = user_result.scalar_one_or_none()
-        
-        # Если нужно, можно добавить поле is_manager в модель User
-        return user is not None  # Временная логика
+        try:
+            user_result = await session.execute(
+                select(User).where(User.telegram_id == telegram_id)
+            )
+            user = user_result.scalar_one_or_none()
+            
+            # Можно добавить поле is_manager в модель User
+            result = user is not None
+            logging.info(f"🔧 Результат проверки БД для {telegram_id}: {result}")
+            return result
+            
+        except Exception as e:
+            logging.error(f"❌ Ошибка проверки прав в БД: {e}")
+            return False
 
 
 # Обработчик кнопки "⬅️ Назад" в панели менеджера
@@ -474,11 +514,21 @@ async def manager_main_menu(callback: CallbackQuery):
 # Обработчик просмотра всех заявок
 @router.callback_query(F.data == "manager_all_requests")
 async def manager_all_requests(callback: CallbackQuery):
+    """Показать все заявки"""
     if not await is_manager(callback.from_user.id):
         await callback.answer("❌ Доступ запрещен")
         return
     
     await show_manager_requests_list(callback, filter_status=None)
+
+@router.callback_query(F.data == "manager_new_requests")
+async def manager_new_requests(callback: CallbackQuery):
+    """Показать новые заявки"""
+    if not await is_manager(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    await show_manager_requests_list(callback, filter_status="new")
 
 
 # Обработчики фильтров для менеджера
@@ -580,9 +630,10 @@ async def show_manager_requests_list(callback: CallbackQuery, filter_status: str
             # Создаем клавиатуру с кнопками для заявок
             builder = InlineKeyboardBuilder()
             for request, user, car in results[:5]:  # Ограничиваем 5 кнопками
+                status_emoji = status_emojis.get(request.status, "📋")
                 builder.row(
                     InlineKeyboardButton(
-                        text=f"#{request.id} - {user.full_name} - {car.brand}",
+                        text=f"{status_emoji} #{request.id} - {user.full_name} - {car.brand}",
                         callback_data=f"manager_view_request:{request.id}"
                     )
                 )
@@ -624,12 +675,121 @@ async def show_manager_requests_list(callback: CallbackQuery, filter_status: str
 # Обработчик детального просмотра заявки менеджером
 @router.callback_query(F.data.startswith("manager_view_request:"))
 async def manager_view_request_detail(callback: CallbackQuery):
+    """Детальный просмотр заявки с возможностью управления"""
     if not await is_manager(callback.from_user.id):
         await callback.answer("❌ Доступ запрещен")
         return
     
     request_id = int(callback.data.split(":")[1])
-    await show_manager_request_detail(callback, request_id)
+    await show_manager_request_with_actions(callback, request_id)
+
+
+async def show_manager_request_with_actions(callback: CallbackQuery, request_id: int):
+    """Показ заявки с кнопками управления"""
+    async with AsyncSessionLocal() as session:
+        try:
+            # Получаем заявку с связанными данными
+            request_result = await session.execute(
+                select(Request, User, Car)
+                .join(User, Request.user_id == User.id)
+                .join(Car, Request.car_id == Car.id)
+                .where(Request.id == request_id)
+            )
+            result = request_result.first()
+            
+            if not result:
+                await callback.answer("❌ Заявка не найдена")
+                return
+            
+            request, user, car = result
+            
+            # Формируем детальную информацию
+            detail_text = (
+                f"📋 <b>Заявка #{request.id}</b>\n\n"
+                f"👤 <b>Клиент:</b> {user.full_name}\n"
+                f"📞 <b>Телефон:</b> {user.phone_number or 'Не указан'}\n"
+                f"🆔 <b>ID пользователя:</b> {user.telegram_id}\n\n"
+                f"🚗 <b>Автомобиль:</b>\n"
+                f"   • Марка: {car.brand}\n"
+                f"   • Модель: {car.model}\n"
+                f"   • Год: {car.year or 'Не указан'}\n"
+                f"   • Госномер: {car.license_plate or 'Не указан'}\n\n"
+                f"🛠️ <b>Услуга:</b> {request.service_type}\n\n"
+                f"📝 <b>Описание:</b>\n{request.description}\n\n"
+            )
+            
+            if request.preferred_date:
+                detail_text += f"🗓️ <b>Желаемая дата:</b> {request.preferred_date}\n\n"
+            
+            # Добавляем статус
+            status_texts = {
+                "new": "🆕 Новая",
+                "accepted": "✅ Принята",
+                "in_progress": "⏳ В работе", 
+                "rejected": "❌ Отклонена",
+                "completed": "🏁 Завершена"
+            }
+            
+            detail_text += f"📊 <b>Статус:</b> {status_texts.get(request.status, request.status)}\n"
+            detail_text += f"⏰ <b>Создана:</b> {request.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+            
+            # Если есть фото
+            if request.photo_file_id:
+                detail_text += f"📷 <b>Фото:</b> Прикреплено\n"
+            
+            # Создаем клавиатуру управления
+            from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardButton
+            
+            builder = InlineKeyboardBuilder()
+            
+            if request.status == 'new':
+                builder.row(
+                    InlineKeyboardButton(text="✅ Принять", callback_data=f"manager_accept:{request.id}"),
+                    InlineKeyboardButton(text="✏️ Уточнить", callback_data=f"manager_clarify:{request.id}")
+                )
+                builder.row(
+                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"manager_reject:{request.id}"),
+                    InlineKeyboardButton(text="📞 Позвонить", callback_data=f"manager_call:{request.id}")
+                )
+            elif request.status == 'accepted':
+                builder.row(
+                    InlineKeyboardButton(text="⏳ В работу", callback_data=f"manager_set_in_progress:{request.id}"),
+                    InlineKeyboardButton(text="✏️ Комментарий", callback_data=f"manager_add_comment:{request.id}")
+                )
+            elif request.status == 'in_progress':
+                builder.row(
+                    InlineKeyboardButton(text="✅ Завершить", callback_data=f"manager_set_completed:{request.id}"),
+                    InlineKeyboardButton(text="✏️ Комментарий", callback_data=f"manager_add_comment:{request.id}")
+                )
+            
+            # Общие кнопки
+            builder.row(
+                InlineKeyboardButton(text="📞 Позвонить", callback_data=f"manager_call:{request.id}"),
+                InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="manager_all_requests")
+            )
+            
+            # Отправляем сообщение
+            if request.photo_file_id:
+                await callback.message.delete()
+                await callback.message.answer_photo(
+                    photo=request.photo_file_id,
+                    caption=detail_text,
+                    parse_mode="HTML",
+                    reply_markup=builder.as_markup()
+                )
+            else:
+                await callback.message.delete()
+                await callback.message.answer(
+                    detail_text,
+                    parse_mode="HTML",
+                    reply_markup=builder.as_markup()
+                )
+            
+        except Exception as e:
+            logging.error(f"Ошибка при загрузке деталей заявки: {e}")
+            await callback.answer("❌ Ошибка при загрузке заявки")
+    
+    await callback.answer()
 
 
 # Функция показа деталей заявки для менеджера
@@ -773,12 +933,12 @@ async def manager_set_in_progress(callback: CallbackQuery):
                 reply_markup=get_manager_request_detail_kb(request_id)
             )
             
+            await callback.answer("✅ Заявка переведена в работу")
+            
         except Exception as e:
             await session.rollback()
             logging.error(f"Ошибка при изменении статуса заявки: {e}")
             await callback.answer("❌ Ошибка при изменении статуса")
-    
-    await callback.answer()
 
 
 # Обработчик установки статуса "Завершена"
@@ -825,22 +985,21 @@ async def manager_set_completed(callback: CallbackQuery):
                 parse_mode="HTML"
             )
             
-            # Обновляем сообщение у менеджера
-            await callback.message.edit_text(
+            # Отправляем новое сообщение вместо редактирования
+            await callback.message.answer(
                 f"🏁 Заявка #{request_id} завершена!\n\n"
-                f"✅ Уведомление отправлено клиенту.",
-                reply_markup=get_manager_request_detail_kb(request_id)
+                f"✅ Уведомление отправлено клиенту."
             )
+            
+            await callback.answer("✅ Заявка завершена")
             
         except Exception as e:
             await session.rollback()
             logging.error(f"Ошибка при завершении заявки: {e}")
             await callback.answer("❌ Ошибка при завершении заявки")
-    
-    await callback.answer()
 
 
-# Обработчик добавления комментария к заявке
+# Обработчик добавления комментария
 @router.callback_query(F.data.startswith("manager_add_comment:"))
 async def manager_add_comment(callback: CallbackQuery, state: FSMContext):
     if not await is_manager(callback.from_user.id):
@@ -851,15 +1010,15 @@ async def manager_add_comment(callback: CallbackQuery, state: FSMContext):
     
     await state.update_data(request_id=request_id)
     
-    await callback.message.edit_text(
+    # Используем безопасную функцию
+    await safe_manager_reply(
+        callback,
         f"✏️ <b>Добавление комментария к заявке #{request_id}</b>\n\n"
         "Введите комментарий для внутреннего использования:\n\n"
         "<i>Этот комментарий виден только менеджерам и не отправляется клиенту.</i>",
-        parse_mode="HTML",
-        reply_markup=get_manager_cancel_kb()
+        get_manager_cancel_kb()
     )
     await state.set_state(ManagerForm.waiting_for_comment)
-    await callback.answer()
 
 
 # Обработчик ввода комментария
@@ -907,3 +1066,143 @@ async def process_manager_comment(message: Message, state: FSMContext):
             await message.answer("❌ Ошибка при сохранении комментария")
         finally:
             await state.clear()
+
+
+# Обработчик для случаев когда заявка не найдена
+@router.callback_query(F.data.startswith("manager_"))
+async def handle_manager_actions(callback: CallbackQuery):
+    """Общий обработчик для действий менеджера"""
+    try:
+        # Проверяем права
+        if not await is_manager(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+            
+        # Если callback содержит ID заявки, проверяем её существование
+        if ":" in callback.data:
+            request_id = int(callback.data.split(":")[1])
+            async with AsyncSessionLocal() as session:
+                request_result = await session.execute(
+                    select(Request).where(Request.id == request_id)
+                )
+                request = request_result.scalar_one_or_none()
+                
+                if not request:
+                    await callback.answer("❌ Заявка не найдена")
+                    await callback.message.edit_text(
+                        f"❌ Заявка #{request_id} не найдена",
+                        reply_markup=get_manager_panel_kb()
+                    )
+                    return
+                    
+    except Exception as e:
+        logging.error(f"Ошибка в обработчике менеджера: {e}")
+        await callback.answer("❌ Произошла ошибка")
+
+
+# Обработчик callback'ов из групп
+@router.callback_query(F.data.startswith("manager_"))
+async def handle_group_callbacks(callback: CallbackQuery, state: FSMContext):
+    """Обработчик callback'ов из групп"""
+    try:
+        logging.info(f"🔔 Callback из группы: {callback.data} от пользователя {callback.from_user.id}")
+        
+        # Проверяем права пользователя
+        if not await is_manager(callback.from_user.id):
+            await callback.answer("❌ У вас нет прав для управления заявками", show_alert=True)
+            return
+        
+        # Обрабатываем разные типы callback'ов
+        if callback.data.startswith("manager_accept:"):
+            await manager_accept_request(callback, state)
+            
+        elif callback.data.startswith("manager_clarify:"):
+            await manager_clarify_request(callback, state)
+            
+        elif callback.data.startswith("manager_reject:"):
+            await manager_reject_request(callback, state)
+            
+        elif callback.data.startswith("manager_call:"):
+            request_id = int(callback.data.split(":")[1])
+            await manager_call_client(callback)
+            
+        elif callback.data.startswith("manager_set_in_progress:"):
+            request_id = int(callback.data.split(":")[1])
+            await manager_set_in_progress(callback)
+            
+        elif callback.data.startswith("manager_set_completed:"):
+            request_id = int(callback.data.split(":")[1])
+            await manager_set_completed(callback)
+            
+        else:
+            await callback.answer("⚠️ Действие не распознано")
+            
+    except Exception as e:
+        logging.error(f"❌ Ошибка обработки callback из группы: {e}")
+        await callback.answer("❌ Произошла ошибка", show_alert=True)
+
+#  Команда проверки прав
+@router.message(Command("check_rights"))
+async def cmd_check_rights(message: Message):
+    """Проверка прав пользователя"""
+    user_id = message.from_user.id
+    is_manager_user = await is_manager(user_id)
+    
+    if is_manager_user:
+        await message.answer(f"✅ Вы менеджер! ID: {user_id}")
+    else:
+        await message.answer(f"❌ Вы не менеджер. ID: {user_id}")
+
+
+async def safe_manager_reply(callback: CallbackQuery, text: str, reply_markup=None):
+    """Безопасный ответ менеджеру (работает и в группах и в личных сообщениях)"""
+    try:
+        await callback.message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        )
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"Ошибка при ответе менеджеру: {e}")
+        # Пробуем отправить в личные сообщения как запасной вариант
+        try:
+            await callback.bot.send_message(
+                chat_id=callback.from_user.id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+            await callback.answer()
+        except Exception as pm_error:
+            logging.error(f"Не удалось отправить даже в личные сообщения: {pm_error}")
+
+@router.callback_query(F.data == "manager_in_progress")
+async def manager_in_progress_requests(callback: CallbackQuery):
+    """Показать заявки в работе"""
+    if not await is_manager(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    await show_manager_requests_list(callback, filter_status="in_progress")
+
+@router.callback_query(F.data == "manager_completed")
+async def manager_completed_requests(callback: CallbackQuery):
+    """Показать завершенные заявки"""
+    if not await is_manager(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    await show_manager_requests_list(callback, filter_status="completed")
+
+# Обработчик команд во время состояний FSM
+@router.message(StateFilter(ManagerForm.waiting_for_price, ManagerForm.waiting_for_deadline, 
+                           ManagerForm.waiting_for_clarification, ManagerForm.waiting_for_reject_reason))
+async def handle_commands_during_fsm(message: Message, state: FSMContext):
+    """Обрабатывает команды во время FSM состояний"""
+    if message.text.startswith('/'):
+        await message.answer(
+            "⚠️ <b>Сначала завершите текущее действие!</b>\n\n"
+            "Завершите ввод данных или нажмите кнопку 'Отменить'",
+            parse_mode="HTML"
+        )

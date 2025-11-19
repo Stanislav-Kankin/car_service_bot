@@ -29,16 +29,13 @@ class Config:
     def validate(cls):
         if not cls.BOT_TOKEN:
             raise ValueError("❌ Отсутствует BOT_TOKEN в .env файле")
-
-        print(f"🔧 Используется БД: {cls.DB_TYPE}")
-        print(f"🔧 DB_URL: {
-            cls.DB_URL.replace(
-                '//', '//***:***@') if 'postgres' in cls.DB_URL else cls.DB_URL
-            }")
         
-        # Предупреждение если нет настроек менеджера
         if not cls.MANAGER_CHAT_ID:
             print("⚠️  MANAGER_CHAT_ID не установлен - уведомления менеджеру не будут отправляться")
+        else:
+            # Проверяем, что это ID группы (отрицательный)
+            if int(cls.MANAGER_CHAT_ID) > 0:
+                print("⚠️  MANAGER_CHAT_ID должен быть отрицательным числом для групп")
 
 
 config = Config()
