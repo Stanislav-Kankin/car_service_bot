@@ -15,9 +15,12 @@ from app.keyboards.main_kb import (
     get_main_kb, get_registration_kb,
     get_phone_reply_kb, get_garage_kb,
     get_car_management_kb, get_car_cancel_kb,
-    get_service_types_kb, get_photo_skip_kb, get_request_confirm_kb,
+    get_service_types_kb, get_tire_subtypes_kb,
+    get_electric_subtypes_kb, get_aggregates_subtypes_kb,
+    get_photo_skip_kb, get_request_confirm_kb,
     get_delete_confirm_kb, get_history_kb, get_edit_cancel_kb
 )
+from app.config import config
 
 
 class CarForm(StatesGroup):
@@ -33,7 +36,10 @@ class CarForm(StatesGroup):
 
 
 class RequestForm(StatesGroup):
+    # Основной тип услуги (группа работ: автомойка, шиномонтаж и т.п.)
     service_type = State()
+    # Подтип услуги (выездной/стационарный, конкретный агрегат и т.п.)
+    service_subtype = State()
     description = State()
     photo = State()
     preferred_date = State()
@@ -51,32 +57,43 @@ async def cmd_start(message: Message, state: FSMContext):
     
     async with AsyncSessionLocal() as session:
         try:
-            user_id = message.from_user.id
-            logging.info(f"🔍 Поиск пользователя {user_id} в БД")
-            
-            result = await session.execute(select(User).where(User.telegram_id == user_id))
+            result = await session.execute(
+                select(User).where(User.telegram_id == message.from_user.id)
+            )
             user = result.scalar_one_or_none()
-
+            
             if user:
-                logging.info(f"✅ Пользователь {user_id} найден: {user.full_name}")
+                logging.info(f"✅ Пользователь {message.from_user.id} уже зарегистрирован")
                 await message.answer(
-                    f"🚗 Добро пожаловать в автосервис, {user.full_name}!\n"
+                    "👋 С возвращением в CAR SERVICE BOT!\n\n"
                     "Выберите действие:",
                     reply_markup=get_main_kb()
                 )
             else:
-                logging.info(f"🆕 Новый пользователь {user_id}")
+                logging.info(f"🆕 Новый пользователь {message.from_user.id}")
                 await message.answer(
-                    "🚗 Добро пожаловать в сервис автомобильных услуг!\n\n"
-                    "Для использования бота необходимо пройти быструю регистрацию.\n"
-                    "Это займет меньше минуты!",
+                    "👋 Добро пожаловать в CAR SERVICE BOT!\n\n"
+                    "Я помогу вам с обслуживанием вашего автомобиля: "
+                    "запись на сервис, шиномонтаж, эвакуатор и многое другое.\n\n"
+                    "Для начала работы нужно пройти простую регистрацию:",
                     reply_markup=get_registration_kb()
                 )
         except Exception as e:
-            logging.error(f"❌ Ошибка при загрузке данных пользователя {message.from_user.id}: {e}")
+            logging.error(f"❌ Ошибка при обработке /start: {e}")
             await message.answer(
-                "❌ Ошибка при загрузке данных. Попробуйте снова: /start"
+                "❌ Произошла ошибка при запуске. Попробуйте позже."
             )
+
+
+# Обработчик кнопки "Назад в меню"
+@router.callback_query(F.data == "back_to_main")
+async def back_to_main(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "🏠 Главное меню\n\nВыберите действие:",
+        reply_markup=get_main_kb()
+    )
+    await callback.answer()
 
 
 # Обработчик нажатия на кнопку "Зарегистрироваться"
@@ -84,20 +101,35 @@ async def cmd_start(message: Message, state: FSMContext):
 async def start_registration(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "📝 Отлично! Давайте начнем регистрацию.\n\n"
-        "Введите ваше полное имя (как в паспорте):"
+        "Введите ваше полное имя (как в профиле или как удобно к вам обращаться):",
+        reply_markup=None
     )
     await state.set_state("waiting_for_name")
     await callback.answer()
 
 
-# Обработчик ввода имени
-@router.message(F.text, StateFilter("waiting_for_name"))
-async def process_name(message: Message, state: FSMContext):
-    name = message.text.strip()
+# Обработчик "Не сейчас" при регистрации
+@router.callback_query(F.data == "skip_registration")
+async def skip_registration(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "Вы можете зарегистрироваться позже.\n\n"
+        "Главное меню:",
+        reply_markup=get_main_kb()
+    )
+    await callback.answer()
 
-    # Простая валидация имени
+
+# Обработчик имени при регистрации
+@router.message(StateFilter("waiting_for_name"))
+async def process_name_registration(message: Message, state: FSMContext):
+    name = message.text.strip()
+    
     if len(name) < 2:
-        await message.answer("❌ Имя слишком короткое. Введите ваше настоящее имя:")
+        await message.answer(
+            "❌ Имя слишком короткое. Пожалуйста, введите полное имя:",
+            reply_markup=None
+        )
         return
 
     await state.update_data(user_name=name)
@@ -113,151 +145,108 @@ async def process_name(message: Message, state: FSMContext):
 # Обработчик ВСЕХ сообщений в состоянии waiting_for_phone (для отладки)
 @router.message(StateFilter("waiting_for_phone"))
 async def handle_all_in_phone_state(message: Message, state: FSMContext):
-    print(f"🔧 DEBUG: Получено сообщение в состоянии waiting_for_phone")
-    print(f"🔧 DEBUG: Тип контента: {message.content_type}")
-    print(f"🔧 DEBUG: Текст: {message.text}")
-    print(f"🔧 DEBUG: Контакт: {message.contact}")
-
-    # Если это контакт
-    if message.contact:
-        await process_contact(message, state)
-    # Если это текст "❌ Отменить"
-    elif message.text == "❌ Отменить":
-        await cancel_phone_reply(message, state)
-    # Любое другое сообщение
-    else:
-        await wrong_input_in_phone_state(message)
+    # Если пользователь зачем-то отправил текст вместо контакта
+    if not message.contact:
+        await message.answer(
+            "📱 Пожалуйста, используйте кнопку для отправки номера телефона:",
+            reply_markup=get_phone_reply_kb()
+        )
+        return
 
 
-# Обработчик получения контакта
-async def process_contact(message: Message, state: FSMContext):
-    print("🔧 DEBUG: Обработка контакта начата")
+# Обработчик контакта при регистрации
+@router.message(StateFilter("waiting_for_phone"))
+async def process_phone_registration(message: Message, state: FSMContext):
+    if not message.contact:
+        await message.answer(
+            "📱 Пожалуйста, используйте кнопку для отправки номера телефона:",
+            reply_markup=get_phone_reply_kb()
+        )
+        return
 
-    contact = message.contact
-    user_data = await state.get_data()
+    phone_number = message.contact.phone_number
+    data = await state.get_data()
+    name = data.get("user_name") or message.from_user.full_name
 
-    print(f"🔧 DEBUG: Данные пользователя: {user_data}")
-    print(f"🔧 DEBUG: Контакт: {contact.phone_number}")
-
-    # Создаем сессию БД
     async with AsyncSessionLocal() as session:
         try:
-            # Сохраняем пользователя в БД
-            new_user = User(
-                telegram_id=message.from_user.id,
-                full_name=user_data['user_name'],
-                phone_number=contact.phone_number
+            # Проверяем, нет ли уже пользователя
+            result = await session.execute(
+                select(User).where(User.telegram_id == message.from_user.id)
             )
-
-            session.add(new_user)
-            await session.commit()
-
-            print("🔧 DEBUG: Пользователь сохранен в БД")
-
-            # УБИРАЕМ REPLY-КЛАВИАТУРУ и отправляем сообщение
-            await message.answer(
-                f"✅ Регистрация завершена!\n\n"
-                f"👤 <b>Ваши данные:</b>\n"
-                f"• Имя: {user_data['user_name']}\n"
-                f"• Телефон: {contact.phone_number}\n\n"
-                "Теперь вы можете пользоваться всеми возможностями бота!",
-                parse_mode="HTML",
-                reply_markup=ReplyKeyboardRemove()  # ← ВОТ ЭТО УБИРАЕТ КЛАВИАТУРУ
-            )
+            user = result.scalar_one_or_none()
             
-            # Отправляем главное меню отдельным сообщением
-            await message.answer(
-                "Выберите действие:",
-                reply_markup=get_main_kb()
-            )
-            
-            await state.clear()
-
+            if user:
+                # Обновляем данные
+                user.full_name = name
+                user.phone_number = phone_number
+                await session.commit()
+                logging.info(f"🔄 Обновлена регистрация пользователя {message.from_user.id}")
+            else:
+                # Создаем нового пользователя
+                new_user = User(
+                    telegram_id=message.from_user.id,
+                    full_name=name,
+                    phone_number=phone_number
+                )
+                session.add(new_user)
+                await session.commit()
+                logging.info(f"✅ Зарегистрирован новый пользователь {message.from_user.id}")
         except Exception as e:
             await session.rollback()
-            print(f"❌ Ошибка при сохранении пользователя: {e}")
+            logging.error(f"❌ Ошибка при сохранении регистрации: {e}")
             await message.answer(
-                "❌ Ошибка при сохранении данных. Попробуйте снова: /start",
-                reply_markup=ReplyKeyboardRemove()  # ← И здесь тоже убираем при ошибке
+                "❌ Произошла ошибка при сохранении данных. Попробуйте позже."
             )
+            return
 
-
-# Обработчик кнопки "Отменить" в Reply-клавиатуре
-async def cancel_phone_reply(message: Message, state: FSMContext):
     await state.clear()
+
     await message.answer(
-        "❌ Регистрация отменена.\n\n"
-        "Если передумаете - просто отправьте /start",
+        "✅ Регистрация завершена!\n\n"
+        "Теперь вы можете управлять своими автомобилями и создавать заявки на услуги.",
         reply_markup=ReplyKeyboardRemove()
     )
 
-
-# Обработчик отмены регистрации (инлайн)
-@router.callback_query(F.data == "cancel_registration")
-async def cancel_registration(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text(
-        "❌ Регистрация отменена.\n\n"
-        "Если передумаете - просто отправьте /start"
-    )
-    await callback.answer()
-
-
-# Общий обработчик отмены (инлайн)
-@router.callback_query(F.data == "cancel_action")
-async def cancel_action(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text(
-        "❌ Действие отменено.\n\n"
-        "Возврат в главное меню: /start"
-    )
-    await callback.answer()
-
-
-# Обработчик для неправильного ввода
-async def wrong_input_in_phone_state(message: Message):
     await message.answer(
-        "❌ Пожалуйста, нажмите на кнопку ниже чтобы отправить номер телефона:",
-        reply_markup=get_phone_reply_kb()
+        "🏠 Главное меню:",
+        reply_markup=get_main_kb()
     )
 
 
-# Обработчик кнопки "🚗 Мой гараж"
+# Обработчик нажатия на "Мой гараж"
 @router.callback_query(F.data == "my_garage")
-async def show_garage(callback: CallbackQuery):
+async def my_garage(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     async with AsyncSessionLocal() as session:
         try:
-            # Получаем пользователя и его автомобили
-            user_id = callback.from_user.id
-            result = await session.execute(select(User).where(User.telegram_id == user_id))
+            # Получаем пользователя
+            result = await session.execute(
+                select(User).where(User.telegram_id == callback.from_user.id)
+            )
             user = result.scalar_one_or_none()
             
             if not user:
-                await callback.message.edit_text("❌ Пользователь не найден. Начните с /start")
+                await callback.message.edit_text(
+                    "❌ Вы еще не зарегистрированы. Нажмите /start для регистрации.",
+                    reply_markup=None
+                )
+                await callback.answer()
                 return
             
-            # Получаем автомобили пользователя
-            cars_result = await session.execute(select(Car).where(Car.user_id == user.id))
-            cars = cars_result.scalars().all()
+            # Получаем автомобили
+            result = await session.execute(
+                select(Car).where(Car.user_id == user.id)
+            )
+            cars = result.scalars().all()
             
             if not cars:
-                # Нет автомобилей - предлагаем добавить
                 await callback.message.edit_text(
-                    "🚗 Ваш гараж пуст\n\n"
-                    "Добавьте свой первый автомобиль чтобы начать пользоваться услугами",
+                    "🚗 В вашем гараже пока нет автомобилей.\n\n"
+                    "Нажмите кнопку ниже, чтобы добавить первый автомобиль:",
                     reply_markup=get_garage_kb()
                 )
             else:
-                # Показываем список автомобилей
-                cars_text = "🚗 Ваш гараж:\n\n"
-                for i, car in enumerate(cars, 1):
-                    cars_text += (
-                        f"{i}. {car.brand} {car.model}\n"
-                        f"   🗓️ Год: {car.year or 'Не указан'}\n"
-                        f"   🚙 Номер: {car.license_plate or 'Не указан'}\n\n"
-                    )
-                
-                # Создаем клавиатуру с кнопками для каждого авто
                 builder = InlineKeyboardBuilder()
                 for car in cars:
                     builder.row(
@@ -267,48 +256,61 @@ async def show_garage(callback: CallbackQuery):
                         )
                     )
                 builder.row(
-                    InlineKeyboardButton(text="➕ Добавить авто", callback_data="add_car"),
-                    InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")
+                    InlineKeyboardButton(
+                        text="➕ Добавить автомобиль", callback_data="add_car")
+                )
+                builder.row(
+                    InlineKeyboardButton(
+                        text="⬅️ В меню", callback_data="back_to_main")
                 )
                 
                 await callback.message.edit_text(
-                    cars_text,
+                    "🚗 Ваш гараж:\n\nВыберите автомобиль для управления или добавьте новый:",
                     reply_markup=builder.as_markup()
                 )
-                
         except Exception as e:
-            logging.error(f"Ошибка при показе гаража: {e}")
-            await callback.message.edit_text("❌ Ошибка при загрузке гаража. Попробуйте снова.")
-    
+            logging.error(f"❌ Ошибка при загрузке гаража: {e}")
+            await callback.message.edit_text(
+                "❌ Ошибка при загрузке гаража. Попробуйте позже.",
+                reply_markup=get_main_kb()
+            )
     await callback.answer()
 
 
-# Обработчик кнопки "➕ Добавить авто"
+# Обработчик кнопки "Добавить автомобиль"
 @router.callback_query(F.data == "add_car")
-async def start_add_car(callback: CallbackQuery, state: FSMContext):
+async def add_car(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "🚗 Добавление нового автомобиля\n\n"
-        "Введите марку автомобиля (например: Toyota):",
+        "🚗 Добавление автомобиля\n\n"
+        "Введите марку автомобиля (например, 'Toyota'):",
         reply_markup=get_car_cancel_kb()
     )
     await state.set_state(CarForm.brand)
     await callback.answer()
 
 
+# Обработчик отмены при добавлении/редактировании авто
+@router.callback_query(F.data == "cancel_car_action")
+async def cancel_car_action(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await my_garage(callback, state)
+
+
 # Обработчик ввода марки авто
 @router.message(CarForm.brand)
 async def process_car_brand(message: Message, state: FSMContext):
     brand = message.text.strip()
+    
     if len(brand) < 2:
         await message.answer(
-            "❌ Марка слишком короткая. Введите корректную марку:",
+            "❌ Марка слишком короткая. Пожалуйста, введите корректную марку:",
             reply_markup=get_car_cancel_kb()
         )
         return
-    
+
     await state.update_data(brand=brand)
     await message.answer(
-        "Теперь введите модель автомобиля (например: Camry):",
+        "Теперь введите модель автомобиля (например, 'Camry'):",
         reply_markup=get_car_cancel_kb()
     )
     await state.set_state(CarForm.model)
@@ -318,417 +320,562 @@ async def process_car_brand(message: Message, state: FSMContext):
 @router.message(CarForm.model)
 async def process_car_model(message: Message, state: FSMContext):
     model = message.text.strip()
+    
     if len(model) < 1:
         await message.answer(
-            "❌ Модель не может быть пустой. Введите корректную модель:",
+            "❌ Модель не может быть пустой. Пожалуйста, введите модель:",
             reply_markup=get_car_cancel_kb()
         )
         return
-    
+
     await state.update_data(model=model)
     await message.answer(
-        "Введите год выпуска автомобиля (например: 2020):",
+        "Введите год выпуска автомобиля (например, 2015):",
         reply_markup=get_car_cancel_kb()
     )
     await state.set_state(CarForm.year)
 
 
-# Обработчик ввода года выпуска
+# Обработчик ввода года авто
 @router.message(CarForm.year)
 async def process_car_year(message: Message, state: FSMContext):
-    year_text = message.text.strip()
-    
-    # Валидация года
-    if not year_text.isdigit():
+    try:
+        year = int(message.text.strip())
+        current_year = datetime.now().year
+        
+        if year < 1980 or year > current_year + 1:
+            await message.answer(
+                f"❌ Пожалуйста, введите год в диапазоне 1980-{current_year + 1}:",
+                reply_markup=get_car_cancel_kb()
+            )
+            return
+    except ValueError:
         await message.answer(
-            "❌ Год должен быть числом. Введите корректный год:",
+            "❌ Пожалуйста, введите год числом (например, 2015):",
             reply_markup=get_car_cancel_kb()
         )
         return
-    
-    year = int(year_text)
-    current_year = datetime.now().year
-    if year < 1900 or year > current_year + 1:
-        await message.answer(
-            f"❌ Год должен быть между 1900 и {current_year + 1}. Введите корректный год:",
-            reply_markup=get_car_cancel_kb()
-        )
-        return
-    
+
     await state.update_data(year=year)
     await message.answer(
-        "Введите госномер автомобиля (например: A123BC777):\n"
-        "Или отправьте /skip чтобы пропустить",
+        "Введите госномер автомобиля (например, А123ВС777):",
         reply_markup=get_car_cancel_kb()
     )
     await state.set_state(CarForm.license_plate)
 
 
-# Обработчик ввода госномера или пропуска
+# Обработчик ввода госномера
 @router.message(CarForm.license_plate)
 async def process_car_license_plate(message: Message, state: FSMContext):
-    license_plate = None
+    license_plate = message.text.strip().upper()
     
-    if message.text != "/skip":
-        license_plate = message.text.strip().upper()
-        if len(license_plate) < 4:
-            await message.answer(
-                "❌ Госномер слишком короткий. Введите корректный номер или /skip:",
-                reply_markup=get_car_cancel_kb()
-            )
-            return
-    
-    user_data = await state.get_data()
-    
+    if len(license_plate) < 4:
+        await message.answer(
+            "❌ Госномер слишком короткий. Пожалуйста, введите корректный номер:",
+            reply_markup=get_car_cancel_kb()
+        )
+        return
+
+    data = await state.get_data()
+    brand = data.get("brand")
+    model = data.get("model")
+    year = data.get("year")
+
     async with AsyncSessionLocal() as session:
         try:
-            # Получаем ID пользователя
-            user_result = await session.execute(
+            # Получаем пользователя
+            result = await session.execute(
                 select(User).where(User.telegram_id == message.from_user.id)
             )
-            user = user_result.scalar_one_or_none()
+            user = result.scalar_one_or_none()
             
             if not user:
                 await message.answer(
                     "❌ Пользователь не найден. Начните с /start",
-                    reply_markup=ReplyKeyboardRemove()
+                    reply_markup=get_main_kb()
+                )
+                await state.clear()
+                return
+
+            # Создаем автомобиль
+            new_car = Car(
+                user_id=user.id,
+                brand=brand,
+                model=model,
+                year=year,
+                license_plate=license_plate
+            )
+            session.add(new_car)
+            await session.commit()
+            
+            await message.answer(
+                f"✅ Автомобиль {brand} {model} ({year}), госномер {license_plate} добавлен в ваш гараж.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"❌ Ошибка при сохранении автомобиля: {e}")
+            await message.answer(
+                "❌ Произошла ошибка при сохранении автомобиля. Попробуйте позже."
+            )
+            await state.clear()
+            return
+
+    await state.clear()
+    # Показываем гараж
+    fake_callback = CallbackQuery(
+        id="fake",
+        from_user=message.from_user,
+        chat_instance="",
+        message=message,
+        data="my_garage"
+    )
+    await my_garage(fake_callback, state)
+
+
+# Обработчик выбора автомобиля в гараже
+@router.callback_query(F.data.startswith("select_car:"))
+async def select_car(callback: CallbackQuery, state: FSMContext):
+    car_id = int(callback.data.split(":")[1])
+    
+    async with AsyncSessionLocal() as session:
+        try:
+            result = await session.execute(
+                select(Car).where(Car.id == car_id)
+            )
+            car = result.scalar_one_or_none()
+            
+            if not car:
+                await callback.message.edit_text(
+                    "❌ Автомобиль не найден.",
+                    reply_markup=get_garage_kb()
+                )
+                await callback.answer()
+                return
+            
+            await callback.message.edit_text(
+                f"🚗 {car.brand} {car.model} ({car.year})\n"
+                f"Госномер: {car.license_plate}\n\n"
+                "Выберите действие:",
+                reply_markup=get_car_management_kb(car.id)
+            )
+        except Exception as e:
+            logging.error(f"❌ Ошибка при выборе автомобиля: {e}")
+            await callback.message.edit_text(
+                "❌ Ошибка при загрузке данных автомобиля.",
+                reply_markup=get_garage_kb()
+            )
+    await callback.answer()
+
+
+# Обработчик редактирования авто
+@router.callback_query(F.data.startswith("edit_car:"))
+async def edit_car(callback: CallbackQuery, state: FSMContext):
+    car_id = int(callback.data.split(":")[1])
+    await state.update_data(car_id=car_id)
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✏️ Марка", callback_data="edit_car_brand"),
+        InlineKeyboardButton(text="✏️ Модель", callback_data="edit_car_model")
+    )
+    builder.row(
+        InlineKeyboardButton(text="✏️ Год выпуска", callback_data="edit_car_year"),
+        InlineKeyboardButton(text="✏️ Госномер", callback_data="edit_car_license")
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"select_car:{car_id}")
+    )
+    
+    await callback.message.edit_text(
+        "✏️ Что вы хотите изменить?",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+
+# Обработчики выбора поля для редактирования
+@router.callback_query(F.data == "edit_car_brand")
+async def edit_car_brand(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Введите новую марку автомобиля:",
+        reply_markup=get_edit_cancel_kb()
+    )
+    await state.set_state(CarForm.edit_brand)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "edit_car_model")
+async def edit_car_model(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Введите новую модель автомобиля:",
+        reply_markup=get_edit_cancel_kb()
+    )
+    await state.set_state(CarForm.edit_model)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "edit_car_year")
+async def edit_car_year(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Введите новый год выпуска автомобиля:",
+        reply_markup=get_edit_cancel_kb()
+    )
+    await state.set_state(CarForm.edit_year)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "edit_car_license")
+async def edit_car_license(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Введите новый госномер автомобиля:",
+        reply_markup=get_edit_cancel_kb()
+    )
+    await state.set_state(CarForm.edit_license_plate)
+    await callback.answer()
+
+
+# Обработчик отмены редактирования
+@router.callback_query(F.data == "cancel_edit")
+async def cancel_edit(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    car_id = data.get("car_id")
+    
+    await state.clear()
+    
+    if car_id:
+        fake_callback = CallbackQuery(
+            id="fake",
+            from_user=callback.from_user,
+            chat_instance="",
+            message=callback.message,
+            data=f"select_car:{car_id}"
+        )
+        await select_car(fake_callback, state)
+    else:
+        await my_garage(callback, state)
+    
+    await callback.answer()
+
+
+# Обработчики ввода новых значений при редактировании
+@router.message(CarForm.edit_brand)
+async def process_edit_brand(message: Message, state: FSMContext):
+    new_brand = message.text.strip()
+    
+    if len(new_brand) < 2:
+        await message.answer(
+            "❌ Марка слишком короткая. Пожалуйста, введите корректную марку:",
+            reply_markup=get_edit_cancel_kb()
+        )
+        return
+    
+    data = await state.get_data()
+    car_id = data.get("car_id")
+    
+    async with AsyncSessionLocal() as session:
+        try:
+            result = await session.execute(
+                select(Car).where(Car.id == car_id)
+            )
+            car = result.scalar_one_or_none()
+            
+            if not car:
+                await message.answer(
+                    "❌ Автомобиль не найден.",
+                    reply_markup=get_main_kb()
                 )
                 await state.clear()
                 return
             
-            # Создаем запись автомобиля
-            new_car = Car(
-                user_id=user.id,
-                brand=user_data['brand'],
-                model=user_data['model'],
-                year=user_data['year'],
-                license_plate=license_plate
-            )
-            
-            session.add(new_car)
+            car.brand = new_brand
             await session.commit()
             
-            # Формируем сообщение об успехе
-            success_text = (
-                "✅ Автомобиль успешно добавлен!\n\n"
-                f"🚗 <b>Данные автомобиля:</b>\n"
-                f"• Марка: {user_data['brand']}\n"
-                f"• Модель: {user_data['model']}\n"
-                f"• Год: {user_data['year']}\n"
-            )
-            
-            if license_plate:
-                success_text += f"• Госномер: {license_plate}\n"
-            
-            success_text += "\nТеперь вы можете создавать заявки для этого автомобиля!"
-            
             await message.answer(
-                success_text,
-                parse_mode="HTML",
-                reply_markup=get_main_kb()
+                f"✅ Марка обновлена на {new_brand}.",
+                reply_markup=ReplyKeyboardRemove()
             )
-            
         except Exception as e:
             await session.rollback()
-            logging.error(f"Ошибка при добавлении автомобиля: {e}")
+            logging.error(f"Ошибка при обновлении марки: {e}")
             await message.answer(
-                "❌ Ошибка при сохранении автомобиля. Попробуйте снова.",
+                "❌ Ошибка при обновлении марки. Попробуйте позже.",
                 reply_markup=get_main_kb()
             )
-        finally:
             await state.clear()
+            return
+
+    await state.clear()
+    fake_callback = CallbackQuery(
+        id="fake",
+        from_user=message.from_user,
+        chat_instance="",
+        message=message,
+        data=f"select_car:{car_id}"
+    )
+    await select_car(fake_callback, state)
 
 
-# Обработчик выбора конкретного автомобиля
-@router.callback_query(F.data.startswith("select_car:"))
-async def select_car(callback: CallbackQuery):
-    car_id = int(callback.data.split(":")[1])
+@router.message(CarForm.edit_model)
+async def process_edit_model(message: Message, state: FSMContext):
+    new_model = message.text.strip()
+    
+    if len(new_model) < 1:
+        await message.answer(
+            "❌ Модель не может быть пустой. Пожалуйста, введите модель:",
+            reply_markup=get_edit_cancel_kb()
+        )
+        return
+    
+    data = await state.get_data()
+    car_id = data.get("car_id")
     
     async with AsyncSessionLocal() as session:
         try:
-            # Получаем данные автомобиля
-            car_result = await session.execute(select(Car).where(Car.id == car_id))
-            car = car_result.scalar_one_or_none()
+            result = await session.execute(
+                select(Car).where(Car.id == car_id)
+            )
+            car = result.scalar_one_or_none()
             
             if not car:
-                await callback.message.edit_text("❌ Автомобиль не найден", reply_markup=get_garage_kb())
-                return
-            
-            car_info = (
-                f"🚗 <b>Выбран автомобиль:</b>\n\n"
-                f"• Марка: {car.brand}\n"
-                f"• Модель: {car.model}\n"
-                f"• Год: {car.year or 'Не указан'}\n"
-                f"• Госномер: {car.license_plate or 'Не указан'}\n\n"
-                f"Выберите действие:"
-            )
-            
-            await callback.message.edit_text(
-                car_info,
-                parse_mode="HTML",
-                reply_markup=get_car_management_kb(car.id)
-            )
-            
-        except Exception as e:
-            logging.error(f"Ошибка при выборе автомобиля: {e}")
-            await callback.message.edit_text(
-                "❌ Ошибка при загрузке данных автомобиля",
-                reply_markup=get_garage_kb()
-            )
-    
-    await callback.answer()
-
-
-# Обработчик отмены добавления авто
-@router.callback_query(F.data == "cancel_car_add")
-async def cancel_car_add(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text(
-        "❌ Добавление автомобиля отменено",
-        reply_markup=get_garage_kb()
-    )
-    await callback.answer()
-
-
-# Обработчик кнопки "⬅️ Назад" в главное меню
-@router.callback_query(F.data == "main_menu")
-async def back_to_main_menu(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    async with AsyncSessionLocal() as session:
-        try:
-            user_result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-            user = user_result.scalar_one_or_none()
-            
-            if user:
-                await callback.message.edit_text(
-                    f"🚗 Добро пожаловать в автосервис, {user.full_name}!\n"
-                    "Выберите действие:",
+                await message.answer(
+                    "❌ Автомобиль не найден.",
                     reply_markup=get_main_kb()
                 )
-            else:
-                await callback.message.edit_text("❌ Пользователь не найден. Начните с /start")
-        except Exception as e:
-            await callback.message.edit_text("❌ Ошибка. Попробуйте снова: /start")
-    
-    await callback.answer()
-
-
-# Обработчик кнопки "⬅️ Назад в гараж"
-@router.callback_query(F.data == "my_garage")
-async def back_to_garage(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await show_garage(callback)
-
-
-# Обработчик кнопки удаления авто
-@router.callback_query(F.data.startswith("delete_car:"))
-async def delete_car_handler(callback: CallbackQuery):
-    car_id = int(callback.data.split(":")[1])
-    
-    async with AsyncSessionLocal() as session:
-        try:
-            # Получаем данные автомобиля
-            car_result = await session.execute(select(Car).where(Car.id == car_id))
-            car = car_result.scalar_one_or_none()
-            
-            if not car:
-                await callback.message.edit_text("❌ Автомобиль не найден")
+                await state.clear()
                 return
             
-            # Показываем подтверждение удаления
-            confirm_text = (
-                "⚠️ <b>Подтверждение удаления</b>\n\n"
-                f"Вы действительно хотите удалить автомобиль?\n\n"
-                f"🚗 <b>{car.brand} {car.model}</b>\n"
-                f"🗓️ Год: {car.year or 'Не указан'}\n"
-                f"🚙 Номер: {car.license_plate or 'Не указан'}\n\n"
-                f"<i>Это действие нельзя отменить!</i>"
-            )
-            
-            await callback.message.edit_text(
-                confirm_text,
-                parse_mode="HTML",
-                reply_markup=get_delete_confirm_kb(car.id)
-            )
-            
-        except Exception as e:
-            logging.error(f"Ошибка при подготовке удаления авто: {e}")
-            await callback.message.edit_text("❌ Ошибка при загрузке данных автомобиля")
-    
-    await callback.answer()
-
-
-# Обработчик подтверждения удаления
-@router.callback_query(F.data.startswith("confirm_delete:"))
-async def confirm_delete_car(callback: CallbackQuery):
-    car_id = int(callback.data.split(":")[1])
-    
-    async with AsyncSessionLocal() as session:
-        try:
-            # Получаем автомобиль
-            car_result = await session.execute(select(Car).where(Car.id == car_id))
-            car = car_result.scalar_one_or_none()
-            
-            if not car:
-                await callback.message.edit_text("❌ Автомобиль не найден")
-                return
-            
-            # Сохраняем информацию для сообщения
-            car_info = f"{car.brand} {car.model}"
-            
-            # Удаляем автомобиль
-            await session.delete(car)
+            car.model = new_model
             await session.commit()
             
-            await callback.message.edit_text(
-                f"✅ Автомобиль <b>{car_info}</b> успешно удален из гаража!",
-                parse_mode="HTML",
-                reply_markup=get_garage_kb()
+            await message.answer(
+                f"✅ Модель обновлена на {new_model}.",
+                reply_markup=ReplyKeyboardRemove()
             )
-            
         except Exception as e:
             await session.rollback()
-            logging.error(f"Ошибка при удалении авто: {e}")
-            await callback.message.edit_text("❌ Ошибка при удалении автомобиля")
-    
-    await callback.answer()
+            logging.error(f"Ошибка при обновлении модели: {e}")
+            await message.answer(
+                "❌ Ошибка при обновлении модели. Попробуйте позже.",
+                reply_markup=get_main_kb()
+            )
+            await state.clear()
+            return
+
+    await state.clear()
+    fake_callback = CallbackQuery(
+        id="fake",
+        from_user=message.from_user,
+        chat_instance="",
+        message=message,
+        data=f"select_car:{car_id}"
+    )
+    await select_car(fake_callback, state)
 
 
-# Обработчик отмены удаления
-@router.callback_query(F.data.startswith("cancel_delete:"))
-async def cancel_delete_car(callback: CallbackQuery):
-    car_id = int(callback.data.split(":")[1])
+@router.message(CarForm.edit_year)
+async def process_edit_year(message: Message, state: FSMContext):
+    try:
+        new_year = int(message.text.strip())
+        current_year = datetime.now().year
+        
+        if new_year < 1980 or new_year > current_year + 1:
+            await message.answer(
+                f"❌ Пожалуйста, введите год в диапазоне 1980-{current_year + 1}:",
+                reply_markup=get_edit_cancel_kb()
+            )
+            return
+    except ValueError:
+        await message.answer(
+            "❌ Пожалуйста, введите год числом (например, 2015):",
+            reply_markup=get_edit_cancel_kb()
+        )
+        return
+
+    data = await state.get_data()
+    car_id = data.get("car_id")
     
     async with AsyncSessionLocal() as session:
         try:
-            # Возвращаемся к управлению автомобилем
-            car_result = await session.execute(select(Car).where(Car.id == car_id))
-            car = car_result.scalar_one_or_none()
+            result = await session.execute(
+                select(Car).where(Car.id == car_id)
+            )
+            car = result.scalar_one_or_none()
             
             if not car:
-                await callback.message.edit_text("❌ Автомобиль не найден")
+                await message.answer(
+                    "❌ Автомобиль не найден.",
+                    reply_markup=get_main_kb()
+                )
+                await state.clear()
                 return
             
-            car_info = (
-                f"🚗 <b>Выбран автомобиль:</b>\n\n"
-                f"• Марка: {car.brand}\n"
-                f"• Модель: {car.model}\n"
-                f"• Год: {car.year or 'Не указан'}\n"
-                f"• Госномер: {car.license_plate or 'Не указан'}\n\n"
-                f"Выберите действие:"
-            )
+            car.year = new_year
+            await session.commit()
             
-            await callback.message.edit_text(
-                car_info,
-                parse_mode="HTML",
-                reply_markup=get_car_management_kb(car.id)
+            await message.answer(
+                f"✅ Год выпуска обновлен на {new_year}.",
+                reply_markup=ReplyKeyboardRemove()
             )
-            
         except Exception as e:
-            logging.error(f"Ошибка при отмене удаления: {e}")
-            await callback.message.edit_text("❌ Ошибка. Возврат в гараж.", reply_markup=get_garage_kb())
+            await session.rollback()
+            logging.error(f"Ошибка при обновлении года: {e}")
+            await message.answer(
+                "❌ Ошибка при обновлении года. Попробуйте позже.",
+                reply_markup=get_main_kb()
+            )
+            await state.clear()
+            return
+
+    await state.clear()
+    fake_callback = CallbackQuery(
+        id="fake",
+        from_user=message.from_user,
+        chat_instance="",
+        message=message,
+        data=f"select_car:{car_id}"
+    )
+    await select_car(fake_callback, state)
+
+
+@router.message(CarForm.edit_license_plate)
+async def process_edit_license_plate(message: Message, state: FSMContext):
+    new_license = message.text.strip().upper()
     
-    await callback.answer()
+    if len(new_license) < 4:
+        await message.answer(
+            "❌ Госномер слишком короткий. Пожалуйста, введите корректный номер:",
+            reply_markup=get_edit_cancel_kb()
+        )
+        return
+
+    data = await state.get_data()
+    car_id = data.get("car_id")
+    
+    async with AsyncSessionLocal() as session:
+        try:
+            result = await session.execute(
+                select(Car).where(Car.id == car_id)
+            )
+            car = result.scalar_one_or_none()
+            
+            if not car:
+                await message.answer(
+                    "❌ Автомобиль не найден.",
+                    reply_markup=get_main_kb()
+                )
+                await state.clear()
+                return
+            
+            car.license_plate = new_license
+            await session.commit()
+            
+            await message.answer(
+                f"✅ Госномер обновлен на {new_license}.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"Ошибка при обновлении госномера: {e}")
+            await message.answer(
+                "❌ Ошибка при обновлении госномера. Попробуйте позже.",
+                reply_markup=get_main_kb()
+            )
+            await state.clear()
+            return
+
+    await state.clear()
+    fake_callback = CallbackQuery(
+        id="fake",
+        from_user=message.from_user,
+        chat_instance="",
+        message=message,
+        data=f"select_car:{car_id}"
+    )
+    await select_car(fake_callback, state)
 
 
-# Создание заявки
-@router.callback_query(F.data.startswith("create_request:"))
-async def create_request_handler(callback: CallbackQuery, state: FSMContext):
+# Обработчик удаления авто
+@router.callback_query(F.data.startswith("delete_car:"))
+async def delete_car(callback: CallbackQuery, state: FSMContext):
     car_id = int(callback.data.split(":")[1])
-    
-    # Сохраняем ID автомобиля в состоянии
     await state.update_data(car_id=car_id)
     
     await callback.message.edit_text(
-        "🛠️ Выберите тип услуги:\n\n"
-        "• ⛽ <b>Топливо</b> - заправка, доставка топлива\n"
-        "• 🧼 <b>Автомойка</b> - мойка, химчистка, полировка\n"
-        "• 🛞 <b>Помощь в дороге</b> - эвакуатор, запуск двигателя, замена колеса\n"
-        "• 🔧 <b>СТО</b> - техническое обслуживание, ремонт\n"
-        "• 🛞 <b>Запчасти</b> - подбор и доставка запчастей",
-        parse_mode="HTML",
-        reply_markup=get_service_types_kb()
+        "❗ Вы уверены, что хотите удалить этот автомобиль?\n"
+        "Это действие нельзя будет отменить.",
+        reply_markup=get_delete_confirm_kb()
     )
-    await state.set_state(RequestForm.service_type)
     await callback.answer()
 
 
-# Обработчик кнопки "Создать заявку" в главном меню
-@router.callback_query(F.data == "create_request")
-async def create_request_main(callback: CallbackQuery, state: FSMContext):
+# Подтверждение удаления авто
+@router.callback_query(F.data == "confirm_delete_car")
+async def confirm_delete_car(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    car_id = data.get("car_id")
+    
     async with AsyncSessionLocal() as session:
         try:
-            user_id = callback.from_user.id
-            result = await session.execute(select(User).where(User.telegram_id == user_id))
-            user = result.scalar_one_or_none()
+            result = await session.execute(
+                select(Car).where(Car.id == car_id)
+            )
+            car = result.scalar_one_or_none()
             
-            if not user:
-                await callback.message.edit_text("❌ Пользователь не найден. Начните с /start")
+            if not car:
+                await callback.message.edit_text(
+                    "❌ Автомобиль не найден.",
+                    reply_markup=get_main_kb()
+                )
+                await state.clear()
+                await callback.answer()
                 return
             
-            # Проверяем есть ли автомобили
-            cars_result = await session.execute(select(Car).where(Car.user_id == user.id))
-            cars = cars_result.scalars().all()
+            session.delete(car)
+            await session.commit()
             
-            if not cars:
-                await callback.message.edit_text(
-                    "🚗 Сначала добавьте автомобиль в гараж!\n\n"
-                    "Чтобы создать заявку, нужно добавить хотя бы один автомобиль.",
-                    reply_markup=get_garage_kb()
-                )
-            else:
-                # Показываем список автомобилей для выбора
-                builder = InlineKeyboardBuilder()
-                for car in cars:
-                    builder.row(
-                        InlineKeyboardButton(
-                            text=f"🚗 {car.brand} {car.model}",
-                            callback_data=f"select_car_for_request:{car.id}"
-                        )
-                    )
-                builder.row(
-                    InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request")
-                )
-                
-                await callback.message.edit_text(
-                    "📝 Создание заявки\n\n"
-                    "Выберите автомобиль для которого создается заявка:",
-                    reply_markup=builder.as_markup()
-                )
-                
+            await callback.message.edit_text(
+                "✅ Автомобиль удален из вашего гаража.",
+                reply_markup=get_main_kb()
+            )
         except Exception as e:
-            logging.error(f"Ошибка при создании заявки: {e}")
-            await callback.message.edit_text("❌ Ошибка. Попробуйте снова.")
+            await session.rollback()
+            logging.error(f"Ошибка при удалении автомобиля: {e}")
+            await callback.message.edit_text(
+                "❌ Ошибка при удалении автомобиля. Попробуйте позже.",
+                reply_markup=get_main_kb()
+            )
+    await state.clear()
+    await callback.answer()
+
+
+# Отмена удаления авто
+@router.callback_query(F.data == "cancel_delete_car")
+async def cancel_delete_car(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    car_id = data.get("car_id")
+    
+    await state.clear()
+    
+    if car_id:
+        fake_callback = CallbackQuery(
+            id="fake",
+            from_user=callback.from_user,
+            chat_instance="",
+            message=callback.message,
+            data=f"select_car:{car_id}"
+        )
+        await select_car(fake_callback, state)
+    else:
+        await my_garage(callback, state)
     
     await callback.answer()
 
 
-# Обработчик кнопки "📊 История заявок"
-@router.callback_query(F.data == "request_history")
-async def request_history_handler(callback: CallbackQuery):
-    await show_requests_list(callback, filter_status="all")
-
-
-# Обработчики фильтров
-@router.callback_query(F.data.startswith("filter_"))
-async def filter_requests_handler(callback: CallbackQuery):
-    filter_type = callback.data.replace("filter_", "")
-    
-    # Маппинг фильтров на статусы БД
-    status_map = {
-        "all": None,
-        "new": "new",
-        "accepted": "accepted", 
-        "in_progress": "in_progress",
-        "rejected": "rejected"
-    }
-    
-    status = status_map.get(filter_type)
-    await show_requests_list(callback, filter_status=status)
-
-
-# Функция показа списка заявок
-async def show_requests_list(callback: CallbackQuery, filter_status: str = None):
+# Обработчик "Создать заявку" (из главного меню)
+@router.callback_query(F.data == "create_request")
+async def create_request(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     async with AsyncSessionLocal() as session:
         try:
             user_id = callback.from_user.id
@@ -739,601 +886,70 @@ async def show_requests_list(callback: CallbackQuery, filter_status: str = None)
             
             if not user:
                 await callback.message.edit_text("❌ Пользователь не найден. Начните с /start")
+                await callback.answer()
                 return
             
-            # Строим запрос с JOIN для подгрузки автомобиля
-            query = (
-                select(Request, Car)
-                .join(Car, Request.car_id == Car.id)  # JOIN для подгрузки автомобиля
-                .where(Request.user_id == user.id)
-            )
+            # Получаем автомобили
+            cars_result = await session.execute(select(Car).where(Car.user_id == user.id))
+            cars = cars_result.scalars().all()
             
-            if filter_status:
-                query = query.where(Request.status == filter_status)
-            
-            query = query.order_by(Request.created_at.desc())
-            
-            requests_result = await session.execute(query)
-            results = requests_result.all()
-            
-            if not results:
-                # Нет заявок по выбранному фильтру
-                no_requests_text = {
-                    None: "📊 У вас пока нет заявок.\n\nСоздайте первую заявку в разделе '📝 Создать заявку'",
-                    "new": "🆕 Нет новых заявок",
-                    "accepted": "✅ Нет принятых заявок", 
-                    "in_progress": "⏳ Нет заявок в работе",
-                    "rejected": "❌ Нет отклоненных заявок"
-                }
-                
+            if not cars:
                 await callback.message.edit_text(
-                    no_requests_text.get(filter_status, "📊 Нет заявок"),
-                    reply_markup=get_history_kb()
+                    "🚗 В вашем гараже пока нет автомобилей.\n\n"
+                    "Сначала добавьте автомобиль:",
+                    reply_markup=get_garage_kb()
                 )
+                await callback.answer()
                 return
             
-            # Формируем список заявок
-            requests_text = "📊 <b>Ваши заявки</b>\n\n"
-            
-            # Маппинг статусов на эмодзи
-            status_emojis = {
-                "new": "🆕",
-                "accepted": "✅", 
-                "in_progress": "⏳",
-                "rejected": "❌",
-                "completed": "🏁"
-            }
-            
-            status_texts = {
-                "new": "Новая",
-                "accepted": "Принята", 
-                "in_progress": "В работе",
-                "rejected": "Отклонена",
-                "completed": "Завершена"
-            }
-
-            for i, (request, car) in enumerate(results, 1):
-                emoji = status_emojis.get(request.status, "📋")
-                status_text = status_texts.get(request.status, request.status)
-                created_date = request.created_at.strftime("%d.%m.%Y")
-                
-                requests_text += (
-                    f"{emoji} <b>Заявка #{request.id}</b>\n"
-                    f"   🛠️ {request.service_type}\n"
-                    f"   🚗 {car.brand} {car.model}\n"
-                    f"   📅 {created_date}\n"
-                    f"   📊 Статус: {emoji} {status_text}\n\n"
-                )
-            
-            # Добавляем информацию о фильтре
-            filter_info = {
-                None: "📋 Показаны все заявки",
-                "new": "🆕 Показаны новые заявки",
-                "accepted": "✅ Показаны принятые заявки",
-                "in_progress": "⏳ Показаны заявки в работе", 
-                "rejected": "❌ Показаны отклоненные заявки"
-            }
-            
-            requests_text += f"<i>{filter_info.get(filter_status, '')}</i>"
-            
-            # Создаем клавиатуру с кнопками для каждой заявки
+            # Показываем выбор автомобиля
             builder = InlineKeyboardBuilder()
-            for request, car in results:
+            for car in cars:
                 builder.row(
                     InlineKeyboardButton(
-                        text=f"📋 Заявка #{request.id} - {car.brand} {car.model}",
-                        callback_data=f"view_request:{request.id}"
+                        text=f"🚗 {car.brand} {car.model}",
+                        callback_data=f"select_car_for_request:{car.id}"
                     )
                 )
-
             builder.row(
-                InlineKeyboardButton(text="🆕 Новые", callback_data="filter_new"),
-                InlineKeyboardButton(text="✅ Принятые", callback_data="filter_accepted")
-            )
-            builder.row(
-                InlineKeyboardButton(text="⏳ В работе", callback_data="filter_in_progress"),
-                InlineKeyboardButton(text="📋 Все", callback_data="filter_all")
-            )
-            builder.row(
-                InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")
-            )
-
-            await callback.message.edit_text(
-                requests_text,
-                parse_mode="HTML",
-                reply_markup=builder.as_markup()
+                InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request")
             )
             
-        except Exception as e:
-            logging.error(f"Ошибка при загрузке истории заявок: {e}")
             await callback.message.edit_text(
-                "❌ Ошибка при загрузке заявок. Попробуйте снова.",
+                "📝 Создание заявки\n\n"
+                "Выберите автомобиль для которого создается заявка:",
+                reply_markup=builder.as_markup()
+            )
+        except Exception as e:
+            logging.error(f"❌ Ошибка при создании заявки: {e}")
+            await callback.message.edit_text(
+                "❌ Ошибка при создании заявки. Попробуйте позже.",
                 reply_markup=get_main_kb()
             )
-    
     await callback.answer()
 
 
-# Обработчик просмотра деталей заявки с навигацией
-@router.callback_query(F.data.startswith("view_request:"))
-async def view_request_detail(callback: CallbackQuery):
-    request_id = int(callback.data.split(":")[1])
-    await show_request_detail(callback, request_id)
-
-    async with AsyncSessionLocal() as session:
-        try:
-            # Получаем заявку с связанными данными
-            request_result = await session.execute(
-                select(Request, User, Car)
-                .join(User, Request.user_id == User.id)
-                .join(Car, Request.car_id == Car.id)
-                .where(Request.id == request_id)
-            )
-            result = request_result.first()
-            
-            if not result:
-                await callback.answer("❌ Заявка не найдена")
-                return
-            
-            request, user, car = result
-            
-            # Проверяем, что заявка принадлежит пользователю
-            if user.telegram_id != callback.from_user.id:
-                await callback.answer("❌ Доступ запрещен")
-                return
-            
-            # Формируем детальную информацию
-            detail_text = (
-                f"📋 <b>Заявка #{request.id}</b>\n\n"
-                f"👤 <b>Клиент:</b> {user.full_name}\n"
-                f"📞 <b>Телефон:</b> {user.phone_number or 'Не указан'}\n\n"
-                f"🚗 <b>Автомобиль:</b>\n"
-                f"   • Марка: {car.brand}\n"
-                f"   • Модель: {car.model}\n"
-                f"   • Год: {car.year or 'Не указан'}\n"
-                f"   • Номер: {car.license_plate or 'Не указан'}\n\n"
-                f"🛠️ <b>Услуга:</b> {request.service_type}\n\n"
-                f"📝 <b>Описание:</b>\n{request.description}\n\n"
-            )
-            
-            if request.preferred_date:
-                detail_text += f"🗓️ <b>Желаемая дата:</b> {request.preferred_date}\n\n"
-            
-            # Добавляем статус
-            status_texts = {
-                "new": "🆕 Новая",
-                "accepted": "✅ Принята",
-                "in_progress": "⏳ В работе",
-                "rejected": "❌ Отклонена", 
-                "completed": "🏁 Завершена"
-            }
-            
-            detail_text += f"📊 <b>Статус:</b> {status_texts.get(request.status, request.status)}\n"
-            detail_text += f"⏰ <b>Создана:</b> {request.created_at.strftime('%d.%m.%Y %H:%M')}\n"
-            
-            # Если есть доп. информация от менеджера
-            if request.status == 'accepted' and hasattr(request, 'manager_notes'):
-                detail_text += f"\n💬 <b>Комментарий менеджера:</b>\n{request.manager_notes}\n"
-            
-            # Отправляем сообщение
-            if request.photo_file_id:
-                await callback.message.delete()
-                await callback.message.answer_photo(
-                    photo=request.photo_file_id,
-                    caption=detail_text,
-                    parse_mode="HTML",
-                    reply_markup=get_request_detail_kb(request.id)
-                )
-            else:
-                await callback.message.edit_text(
-                    detail_text,
-                    parse_mode="HTML",
-                    reply_markup=get_request_detail_kb(request.id)
-                )
-            
-        except Exception as e:
-            logging.error(f"Ошибка при загрузке деталей заявки: {e}")
-            await callback.answer("❌ Ошибка при загрузке заявки")
-    
-    await callback.answer()
-
-
-# Функция показа деталей заявки с навигацией
-async def show_request_detail(callback: CallbackQuery, request_id: int):
-    async with AsyncSessionLocal() as session:
-        try:
-            # Получаем текущего пользователя
-            user_result = await session.execute(
-                select(User).where(User.telegram_id == callback.from_user.id)
-            )
-            user = user_result.scalar_one_or_none()
-            
-            if not user:
-                await callback.answer("❌ Пользователь не найден")
-                return
-            
-            # Получаем все ID заявок пользователя для навигации
-            requests_ids_result = await session.execute(
-                select(Request.id)
-                .where(Request.user_id == user.id)
-                .order_by(Request.created_at.desc())
-            )
-            requests_ids = [row[0] for row in requests_ids_result.all()]
-            
-            if not requests_ids:
-                await callback.answer("❌ Заявки не найдены")
-                return
-            
-            # Находим текущий индекс
-            current_index = requests_ids.index(request_id) if request_id in requests_ids else 0
-            
-            # Получаем заявку с связанными данными
-            request_result = await session.execute(
-                select(Request, User, Car)
-                .join(User, Request.user_id == User.id)
-                .join(Car, Request.car_id == Car.id)
-                .where(Request.id == request_id)
-            )
-            result = request_result.first()
-            
-            if not result:
-                await callback.answer("❌ Заявка не найдена")
-                return
-            
-            request, user, car = result
-            
-            # Проверяем, что заявка принадлежит пользователю
-            if user.telegram_id != callback.from_user.id:
-                await callback.answer("❌ Доступ запрещен")
-                return
-            
-            # Формируем детальную информацию
-            detail_text = (
-                f"📋 <b>Заявка #{request.id}</b> ({current_index + 1}/{len(requests_ids)})\n\n"
-                f"👤 <b>Клиент:</b> {user.full_name}\n"
-                f"📞 <b>Телефон:</b> {user.phone_number or 'Не указан'}\n\n"
-                f"🚗 <b>Автомобиль:</b>\n"
-                f"   • Марка: {car.brand}\n"
-                f"   • Модель: {car.model}\n"
-                f"   • Год: {car.year or 'Не указан'}\n"
-                f"   • Номер: {car.license_plate or 'Не указан'}\n\n"
-                f"🛠️ <b>Услуга:</b> {request.service_type}\n\n"
-                f"📝 <b>Описание:</b>\n{request.description}\n\n"
-            )
-            
-            if request.preferred_date:
-                detail_text += f"🗓️ <b>Желаемая дата:</b> {request.preferred_date}\n\n"
-            
-            # Добавляем статус
-            status_texts = {
-                "new": "🆕 Новая",
-                "accepted": "✅ Принята",
-                "in_progress": "⏳ В работе",
-                "rejected": "❌ Отклонена", 
-                "completed": "🏁 Завершена"
-            }
-            
-            detail_text += f"📊 <b>Статус:</b> {status_texts.get(request.status, request.status)}\n"
-            detail_text += f"⏰ <b>Создана:</b> {request.created_at.strftime('%d.%m.%Y %H:%M')}\n"
-            
-            # Отправляем сообщение
-            if request.photo_file_id:
-                await callback.message.delete()
-                await callback.message.answer_photo(
-                    photo=request.photo_file_id,
-                    caption=detail_text,
-                    parse_mode="HTML",
-                    reply_markup=get_requests_navigation_kb(requests_ids, current_index)
-                )
-            else:
-                await callback.message.edit_text(
-                    detail_text,
-                    parse_mode="HTML",
-                    reply_markup=get_requests_navigation_kb(requests_ids, current_index)
-                )
-            
-        except Exception as e:
-            logging.error(f"Ошибка при загрузке деталей заявки: {e}")
-            await callback.answer("❌ Ошибка при загрузке заявки")
-    
-    await callback.answer()
-
-
-# Обработчик кнопки "⬅️ Назад" из детального просмотра
-@router.callback_query(F.data == "history")
-async def back_to_history(callback: CallbackQuery):
-    await request_history_handler(callback)
-
-
-# Обработчик кнопки редактирования авто
-@router.callback_query(F.data.startswith("edit_car:"))
-async def edit_car_handler(callback: CallbackQuery, state: FSMContext):
-    car_id = int(callback.data.split(":")[1])
-    
-    async with AsyncSessionLocal() as session:
-        try:
-            # Получаем данные автомобиля
-            car_result = await session.execute(select(Car).where(Car.id == car_id))
-            car = car_result.scalar_one_or_none()
-            
-            if not car:
-                await callback.answer("❌ Автомобиль не найден")
-                return
-            
-            # Сохраняем ID автомобиля в состоянии
-            await state.update_data(car_id=car_id)
-            
-            # Показываем меню редактирования
-            edit_text = (
-                f"✏️ <b>Редактирование автомобиля</b>\n\n"
-                f"🚗 <b>Текущие данные:</b>\n"
-                f"• Марка: {car.brand}\n"
-                f"• Модель: {car.model}\n"
-                f"• Год: {car.year or 'Не указан'}\n"
-                f"• Госномер: {car.license_plate or 'Не указан'}\n\n"
-                f"Выберите что хотите изменить:"
-            )
-            
-            builder = InlineKeyboardBuilder()
-            builder.row(
-                InlineKeyboardButton(text="🏷️ Марка", callback_data=f"edit_field:brand:{car_id}"),
-                InlineKeyboardButton(text="🚙 Модель", callback_data=f"edit_field:model:{car_id}")
-            )
-            builder.row(
-                InlineKeyboardButton(text="🗓️ Год", callback_data=f"edit_field:year:{car_id}"),
-                InlineKeyboardButton(text="🔢 Госномер", callback_data=f"edit_field:license_plate:{car_id}")
-            )
-            builder.row(
-                InlineKeyboardButton(text="⬅️ Назад", callback_data=f"select_car:{car_id}")
-            )
-            
-            await callback.message.edit_text(
-                edit_text,
-                parse_mode="HTML",
-                reply_markup=builder.as_markup()
-            )
-            
-        except Exception as e:
-            logging.error(f"Ошибка при редактировании авто: {e}")
-            await callback.answer("❌ Ошибка при загрузке данных")
-    
-    await callback.answer()
-
-
-# Обработчик выбора поля для редактирования
-@router.callback_query(F.data.startswith("edit_field:"))
-async def edit_field_handler(callback: CallbackQuery, state: FSMContext):
-    data_parts = callback.data.split(":")
-    field_name = data_parts[1]
-    car_id = int(data_parts[2])
-    
-    # Сохраняем данные в состоянии
-    await state.update_data(
-        car_id=car_id,
-        edit_field=field_name
-    )
-    
-    async with AsyncSessionLocal() as session:
-        try:
-            # Получаем текущие данные автомобиля
-            car_result = await session.execute(select(Car).where(Car.id == car_id))
-            car = car_result.scalar_one_or_none()
-            
-            if not car:
-                await callback.answer("❌ Автомобиль не найден")
-                return
-            
-            # Тексты и состояния для разных полей
-            field_config = {
-                "brand": {
-                    "text": f"🏷️ Введите новую марку автомобиля:\n\nТекущая марка: <b>{car.brand}</b>",
-                    "state": CarForm.edit_brand
-                },
-                "model": {
-                    "text": f"🚙 Введите новую модель автомобиля:\n\nТекущая модель: <b>{car.model}</b>",
-                    "state": CarForm.edit_model
-                },
-                "year": {
-                    "text": f"🗓️ Введите новый год выпуска:\n\nТекущий год: <b>{car.year or 'Не указан'}</b>",
-                    "state": CarForm.edit_year
-                },
-                "license_plate": {
-                    "text": f"🔢 Введите новый госномер:\n\nТекущий номер: <b>{car.license_plate or 'Не указан'}</b>\n\nИли отправьте /skip чтобы удалить госномер",
-                    "state": CarForm.edit_license_plate
-                }
-            }
-            
-            config = field_config.get(field_name)
-            if not config:
-                await callback.answer("❌ Неверное поле для редактирования")
-                return
-            
-            await callback.message.edit_text(
-                config["text"],
-                parse_mode="HTML",
-                reply_markup=get_edit_cancel_kb(car_id)
-            )
-            await state.set_state(config["state"])
-            
-        except Exception as e:
-            logging.error(f"Ошибка при выборе поля: {e}")
-            await callback.answer("❌ Ошибка")
-    
-    await callback.answer()
-
-
-# Обработчик отмены редактирования
-@router.callback_query(F.data.startswith("cancel_edit:"))
-async def cancel_edit_car(callback: CallbackQuery, state: FSMContext):
-    car_id = int(callback.data.split(":")[1])
-    
+@router.callback_query(F.data.startswith("create_request_for_car:"))
+async def create_request_for_car(callback: CallbackQuery, state: FSMContext):
+    """
+    Создание заявки напрямую из карточки конкретного авто.
+    По сути то же самое, что select_car_for_request, только без выбора авто.
+    """
     await state.clear()
-    
-    async with AsyncSessionLocal() as session:
-        try:
-            # Получаем данные автомобиля для возврата в меню управления
-            car_result = await session.execute(select(Car).where(Car.id == car_id))
-            car = car_result.scalar_one_or_none()
-            
-            if not car:
-                await callback.message.edit_text("❌ Автомобиль не найден")
-                return
-            
-            car_info = (
-                f"🚗 <b>Выбран автомобиль:</b>\n\n"
-                f"• Марка: {car.brand}\n"
-                f"• Модель: {car.model}\n"
-                f"• Год: {car.year or 'Не указан'}\n"
-                f"• Госномер: {car.license_plate or 'Не указан'}\n\n"
-                f"Редактирование отменено. Выберите действие:"
-            )
-            
-            await callback.message.edit_text(
-                car_info,
-                parse_mode="HTML",
-                reply_markup=get_car_management_kb(car.id)
-            )
-            
-        except Exception as e:
-            logging.error(f"Ошибка при отмене редактирования: {e}")
-            await callback.message.edit_text(
-                "❌ Ошибка. Возврат в гараж.",
-                reply_markup=get_garage_kb()
-            )
-    
-    await callback.answer()
-
-
-# Обработчик ввода новой марки
-@router.message(CarForm.edit_brand)
-async def process_edit_brand(message: Message, state: FSMContext):
-    brand = message.text.strip()
-    
-    if len(brand) < 2:
-        await message.answer("❌ Марка слишком короткая. Введите корректную марку:")
-        return
-    
-    await update_car_field(message, state, "brand", brand)
-
-# Обработчик ввода новой модели
-@router.message(CarForm.edit_model)
-async def process_edit_model(message: Message, state: FSMContext):
-    model = message.text.strip()
-    
-    if len(model) < 1:
-        await message.answer("❌ Модель не может быть пустой. Введите корректную модель:")
-        return
-    
-    await update_car_field(message, state, "model", model)
-
-# Обработчик ввода нового года
-@router.message(CarForm.edit_year)
-async def process_edit_year(message: Message, state: FSMContext):
-    year_text = message.text.strip()
-    
-    if not year_text.isdigit():
-        await message.answer("❌ Год должен быть числом. Введите корректный год:")
-        return
-    
-    year = int(year_text)
-    current_year = datetime.now().year
-    if year < 1900 or year > current_year + 1:
-        await message.answer(f"❌ Год должен быть между 1900 и {current_year + 1}. Введите корректный год:")
-        return
-    
-    await update_car_field(message, state, "year", year)
-
-# Обработчик ввода нового госномера
-@router.message(CarForm.edit_license_plate)
-async def process_edit_license_plate(message: Message, state: FSMContext):
-    license_plate = None
-    
-    if message.text != "/skip":
-        license_plate = message.text.strip().upper()
-        if len(license_plate) < 4:
-            await message.answer("❌ Госномер слишком короткий. Введите корректный номер или /skip:")
-            return
-    
-    await update_car_field(message, state, "license_plate", license_plate)
-
-
-# Функция обновления поля автомобиля
-async def update_car_field(message: Message, state: FSMContext, field_name: str, new_value):
-    user_data = await state.get_data()
-    car_id = user_data['car_id']
-    
-    async with AsyncSessionLocal() as session:
-        try:
-            # Получаем автомобиль
-            car_result = await session.execute(select(Car).where(Car.id == car_id))
-            car = car_result.scalar_one_or_none()
-            
-            if not car:
-                await message.answer("❌ Автомобиль не найден")
-                await state.clear()
-                return
-            
-            # Сохраняем старое значение для сообщения
-            old_value = getattr(car, field_name)
-            
-            # Обновляем поле
-            setattr(car, field_name, new_value)
-            await session.commit()
-            
-            # Формируем сообщение об успехе
-            field_names = {
-                "brand": "марка",
-                "model": "модель", 
-                "year": "год выпуска",
-                "license_plate": "госномер"
-            }
-            
-            success_text = (
-                f"✅ <b>{field_names[field_name].title()} успешно обновлена!</b>\n\n"
-                f"🚗 <b>Автомобиль:</b> {car.brand} {car.model}\n"
-            )
-            
-            if field_name == "license_plate":
-                if new_value:
-                    success_text += f"🔢 <b>Новый госномер:</b> {new_value}\n"
-                else:
-                    success_text += f"🔢 <b>Госномер:</b> Удален\n"
-            else:
-                success_text += f"📝 <b>Было:</b> {old_value or 'Не указано'}\n"
-                success_text += f"📝 <b>Стало:</b> {new_value}\n"
-            
-            await message.answer(
-                success_text,
-                parse_mode="HTML",
-                reply_markup=get_car_management_kb(car.id)
-            )
-            
-        except Exception as e:
-            await session.rollback()
-            logging.error(f"Ошибка при обновлении автомобиля: {e}")
-            await message.answer(
-                "❌ Ошибка при обновлении данных. Попробуйте снова.",
-                reply_markup=get_edit_cancel_kb(car_id)
-            )
-        finally:
-            await state.clear()
-
-
-# Обработчик выбора авто для заявки
-@router.callback_query(F.data.startswith("select_car_for_request:"))
-async def select_car_for_request(callback: CallbackQuery, state: FSMContext):
     car_id = int(callback.data.split(":")[1])
-    
+
     # Сохраняем ID автомобиля в состоянии
     await state.update_data(car_id=car_id)
-    
+
     await callback.message.edit_text(
-        "🛠️ Выберите тип услуги:\n\n"
-        "• ⛽ <b>Топливо</b> - заправка, доставка топлива\n"
-        "• 🧼 <b>Автомойка</b> - мойка, химчистка, полировка\n"
-        "• 🛞 <b>Помощь в дороге</b> - эвакуатор, запуск двигателя, замена колеса\n"
-        "• 🔧 <b>СТО</b> - техническое обслуживание, ремонт\n"
-        "• 🛞 <b>Запчасти</b> - подбор и доставка запчастей",
+        "🛠️ Выберите вид работ:\n\n"
+        "• 🧼 <b>Автомойки</b> — мойка, химчистка, детейлинг\n"
+        "• 🛞 <b>Шиномонтаж</b> — переобувка, ремонт шин и дисков\n"
+        "• ⚡ <b>Автоэлектрик</b> — диагностика и ремонт электрики\n"
+        "• 🔧 <b>Слесарные работы</b> — подвеска, тормоза, ДВС и т.п.\n"
+        "• 🎨 <b>Малярные работы</b> — кузовной ремонт, покраска\n"
+        "• 🛠️ <b>Техобслуживание</b> — ТО, масла, фильтры\n"
+        "• ⚙️ <b>Ремонт агрегатов</b> — турбины, стартер, генератор, рейка",
         parse_mode="HTML",
         reply_markup=get_service_types_kb()
     )
@@ -1341,35 +957,161 @@ async def select_car_for_request(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# Обработчик выбора типа услуги
+
+# Отмена создания заявки
+@router.callback_query(F.data == "cancel_request")
+async def cancel_request(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "❌ Создание заявки отменено.\n\n"
+        "Главное меню:",
+        reply_markup=get_main_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("select_car_for_request:"))
+async def select_car_for_request(callback: CallbackQuery, state: FSMContext):
+    car_id = int(callback.data.split(":")[1])
+
+    # Сохраняем ID автомобиля в состоянии
+    await state.update_data(car_id=car_id)
+
+    await callback.message.edit_text(
+        "🛠️ Выберите вид работ:\n\n"
+        "• 🧼 <b>Автомойки</b> — мойка, химчистка, детейлинг\n"
+        "• 🛞 <b>Шиномонтаж</b> — переобувка, ремонт шин и дисков\n"
+        "• ⚡ <b>Автоэлектрик</b> — диагностика и ремонт электрики\n"
+        "• 🔧 <b>Слесарные работы</b> — подвеска, тормоза, ДВС и т.п.\n"
+        "• 🎨 <b>Малярные работы</b> — кузовной ремонт, покраска\n"
+        "• 🛠️ <b>Техобслуживание</b> — ТО, масла, фильтры\n"
+        "• ⚙️ <b>Ремонт агрегатов</b> — турбины, стартер, генератор, рейка",
+        parse_mode="HTML",
+        reply_markup=get_service_types_kb()
+    )
+    await state.set_state(RequestForm.service_type)
+    await callback.answer()
+
+
 @router.callback_query(RequestForm.service_type)
 async def process_service_type(callback: CallbackQuery, state: FSMContext):
+    """
+    Обработка выбора основного вида работ (группа услуг).
+    На этом шаге либо сразу фиксируем тип услуги, либо
+    уходим на выбор подтипа (выездной/стационарный, агрегаты).
+    """
     service_data = callback.data
-    
-    # Маппинг callback_data на человекочитаемые названия
-    service_map = {
-        "service_fuel": "⛽ Топливо",
-        "service_wash": "🧼 Автомойка", 
-        "service_roadside": "🛞 Помощь в дороге",
-        "service_sto": "🔧 СТО",
-        "service_parts": "🛞 Запчасти"
+
+    # Возврат к списку групп услуг из подтипов
+    if service_data == "service_back_to_groups":
+        await callback.message.edit_text(
+            "🛠️ Выберите вид работ:",
+            reply_markup=get_service_types_kb()
+        )
+        await state.set_state(RequestForm.service_type)
+        await callback.answer()
+        return
+
+    # Группы, которые НЕ требуют дополнительного выбора подтипа
+    direct_groups = {
+        "service_group_wash": "Автомойки",
+        "service_group_mechanic": "Слесарные работы",
+        "service_group_paint": "Малярные работы",
+        "service_group_maint": "Техобслуживание",
     }
-    
-    if service_data not in service_map:
+
+    # Группы, которые ведут на выбор подтипа
+    if service_data == "service_group_tire":
+        await callback.message.edit_text(
+            "🛞 Шиномонтаж\n\n"
+            "Выберите формат работы:",
+            reply_markup=get_tire_subtypes_kb()
+        )
+        await state.set_state(RequestForm.service_subtype)
+        await callback.answer()
+        return
+
+    if service_data == "service_group_electric":
+        await callback.message.edit_text(
+            "⚡ Автоэлектрик\n\n"
+            "Выберите формат работы:",
+            reply_markup=get_electric_subtypes_kb()
+        )
+        await state.set_state(RequestForm.service_subtype)
+        await callback.answer()
+        return
+
+    if service_data == "service_group_aggregates":
+        await callback.message.edit_text(
+            "⚙️ Ремонт агрегатов\n\n"
+            "Что именно требуется отремонтировать?",
+            reply_markup=get_aggregates_subtypes_kb()
+        )
+        await state.set_state(RequestForm.service_subtype)
+        await callback.answer()
+        return
+
+    if service_data not in direct_groups:
         await callback.answer("❌ Неверный тип услуги")
         return
-    
-    service_name = service_map[service_data]
+
+    service_name = direct_groups[service_data]
     await state.update_data(service_type=service_name)
-    
+
     await callback.message.edit_text(
         f"📝 Услуга: <b>{service_name}</b>\n\n"
         "Теперь опишите проблему или услугу подробно:\n\n"
         "<i>Примеры:</i>\n"
-        "• 'Нужна заправка 95 бензина, 40 литров'\n"  
-        "• 'Не заводится двигатель, странные звуки при повороте ключа'\n"
+        "• 'Нужна комплексная мойка кузова и салона'\n"
+        "• 'Стук в подвеске на кочках, нужна диагностика'\n"
         "• 'Требуется замена масла и фильтров'\n"
-        "• 'Потерял ключи от машины, нужен дубликат'",
+        "• 'Кузовной ремонт после небольшого ДТП'",
+        parse_mode="HTML",
+        reply_markup=get_car_cancel_kb()
+    )
+    await state.set_state(RequestForm.description)
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.service_subtype)
+async def process_service_subtype(callback: CallbackQuery, state: FSMContext):
+    """
+    Обработка выбора подтипа услуги (выездной/стационарный, конкретный агрегат и т.п.).
+    В БД сохраняем уже человекочитаемое название в поле service_type.
+    """
+    service_data = callback.data
+
+    subtype_map = {
+        # Шиномонтаж
+        "service_tire_stationary": "Шиномонтаж (на СТО)",
+        "service_tire_mobile": "Шиномонтаж / Выездной шиномонтаж",
+
+        # Автоэлектрик
+        "service_electric_stationary": "Автоэлектрик (на СТО)",
+        "service_electric_mobile": "Автоэлектрик / Выездной мастер",
+
+        # Ремонт агрегатов
+        "service_agg_turbo": "Ремонт агрегатов / Турбина",
+        "service_agg_starter": "Ремонт агрегатов / Стартер",
+        "service_agg_generator": "Ремонт агрегатов / Генератор",
+        "service_agg_steering": "Ремонт агрегатов / Рулевая рейка",
+    }
+
+    if service_data not in subtype_map:
+        await callback.answer("❌ Неверный подтип услуги")
+        return
+
+    service_name = subtype_map[service_data]
+    await state.update_data(service_type=service_name)
+
+    await callback.message.edit_text(
+        f"📝 Услуга: <b>{service_name}</b>\n\n"
+        "Теперь опишите проблему или услугу подробно:\n\n"
+        "<i>Примеры:</i>\n"
+        "• 'Пробило колесо, нужен выездной шиномонтаж'\n"
+        "• 'Авто не заводится, подозрение на стартер'\n"
+        "• 'Снижение тяги, подозрение на турбину'\n"
+        "• 'Люфт руля, подозрение на рулевую рейку'",
         parse_mode="HTML",
         reply_markup=get_car_cancel_kb()
     )
@@ -1393,292 +1135,355 @@ async def process_description(message: Message, state: FSMContext):
     await state.update_data(description=description)
     
     await message.answer(
-        "📷 <b>Прикрепите фото или видео</b>\n\n"
-        "Если есть фото проблемы или детали, прикрепите их сейчас.\n"
-        "Или нажмите 'Пропустить' чтобы продолжить без фото.",
-        parse_mode="HTML",
+        "📷 Прикрепите фото проблемы (если есть) или нажмите 'Пропустить':",
         reply_markup=get_photo_skip_kb()
     )
     await state.set_state(RequestForm.photo)
 
 
-# Обработчик пропуска фото
-@router.callback_query(F.data == "skip_photo", RequestForm.photo)
-async def skip_photo(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(photo_file_id=None)
-    await process_photo_complete(callback, state)
+# Обработчик фото
+@router.callback_query(RequestForm.photo, F.data == "attach_photo")
+async def attach_photo(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "📷 Отправьте одно или несколько фото.\n\n"
+        "Когда закончите, нажмите 'Пропустить'.",
+        reply_markup=get_photo_skip_kb()
+    )
     await callback.answer()
 
 
-# Обработчик прикрепления фото или видео
-@router.message(RequestForm.photo, F.media_group_id)
-async def process_media_group(message: Message, state: FSMContext):
-    """Обработчик медиагрупп (несколько фото/видео)"""
+# Обработка входящих фото
+@router.message(RequestForm.photo, F.photo)
+async def process_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    photos = data.get("photos", [])
+    
+    file_id = message.photo[-1].file_id
+    photos.append(file_id)
+    
+    await state.update_data(photos=photos)
+    
     await message.answer(
-        "⚠️ <b>Поддерживается только одно фото или видео</b>\n\n"
-        "Пожалуйста, отправьте только одно фото или видео:",
-        parse_mode="HTML",
+        f"✅ Фото добавлено ({len(photos)} шт.).\n"
+        "Можете отправить ещё или нажмите 'Пропустить', чтобы продолжить.",
         reply_markup=get_photo_skip_kb()
     )
 
-@router.message(RequestForm.photo, F.photo)
-async def process_photo_message(message: Message, state: FSMContext):
-    photo_file_id = message.photo[-1].file_id
-    await state.update_data(photo_file_id=photo_file_id)
-    
-    # Удаляем сообщение с фото (опционально, для чистоты чата)
-    try:
-        await message.delete()
-    except:
-        pass
-    
-    # Отправляем подтверждение получения фото
-    confirm_msg = await message.answer("✅ Фото принято!")
-    
-    # Переходим к следующему шагу
-    await process_photo_complete(confirm_msg, state)
 
-@router.message(RequestForm.photo, F.video)
-async def process_video_message(message: Message, state: FSMContext):
-    video_file_id = message.video.file_id
-    await state.update_data(photo_file_id=video_file_id)  # Используем то же поле для видео
+# Пропуск прикрепления фото
+@router.callback_query(RequestForm.photo, F.data == "skip_photo")
+async def skip_photo(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
     
-    try:
-        await message.delete()
-    except:
-        pass
+    service_type = data.get("service_type", "Не указано")
+    description = data.get("description", "Не указано")
+    photos = data.get("photos", [])
     
-    confirm_msg = await message.answer("✅ Видео принято!")
-    await process_photo_complete(confirm_msg, state)
-
-@router.message(RequestForm.photo, F.document)
-async def process_document_message(message: Message, state: FSMContext):
-    """Обработчик документов (может быть видео файлом)"""
-    document = message.document
-    mime_type = document.mime_type or ""
+    photos_text = f"{len(photos)} шт." if photos else "нет"
     
-    if mime_type.startswith('video/'):
-        # Это видео файл
-        video_file_id = document.file_id
-        await state.update_data(photo_file_id=video_file_id)
-        
-        try:
-            await message.delete()
-        except:
-            pass
-        
-        confirm_msg = await message.answer("✅ Видео-файл принято!")
-        await process_photo_complete(confirm_msg, state)
-    else:
-        await message.answer(
-            "❌ <b>Поддерживаются только фото и видео</b>\n\n"
-            "Пожалуйста, отправьте фото или видео, либо пропустите этот шаг:",
-            parse_mode="HTML",
-            reply_markup=get_photo_skip_kb()
-        )
-
-
-# Обработчик кнопки "Прикрепить фото"
-@router.callback_query(F.data == "attach_photo", RequestForm.photo)
-async def attach_photo(callback: CallbackQuery, state: FSMContext):
+    # Переходим к подтверждению заявки
     await callback.message.edit_text(
-        "📷 Отправьте фото или видео в этот чат:\n\n"
-        "<i>Просто пришлите фото как обычное сообщение</i>",
-        parse_mode="HTML",
-        reply_markup=get_car_cancel_kb()
+        "📄 Заявка на услугу\n\n"
+        f"🚗 Авто: будет показано менеджеру по ID\n"
+        f"🔧 Услуга: {service_type}\n"
+        f"📝 Описание: {description}\n"
+        f"📷 Фото: {photos_text}\n\n"
+        "Подтвердите создание заявки:",
+        reply_markup=get_request_confirm_kb()
     )
+    await state.set_state(RequestForm.confirm)
     await callback.answer()
 
 
-# Общий обработчик завершения шага с фото
-async def process_photo_complete(update, state: FSMContext):
-    if isinstance(update, CallbackQuery):
-        message = update.message
-    else:
-        message = update
-    
-    await message.answer(
-        "🗓️ <b>Укажите предпочтительную дату</b>\n\n"
-        "Когда вам было бы удобно приехать или когда требуется услуга?\n\n"
-        "<i>Примеры:</i>\n"
-        "• 'Завтра утром'\n"
-        "• 'В среду после 15:00'\n" 
-        "• 'Как можно скорее'\n"
-        "• 'В любое время на этой неделе'",
-        parse_mode="HTML",
-        reply_markup=get_car_cancel_kb()
-    )
-    await state.set_state(RequestForm.preferred_date)
-
-
-# Обработчик ввода даты
-@router.message(RequestForm.preferred_date)
-async def process_preferred_date(message: Message, state: FSMContext):
-    preferred_date = message.text.strip()
-    
-    if len(preferred_date) < 3:
-        await message.answer(
-            "❌ Пожалуйста, укажите дату более подробно:",
-            reply_markup=get_car_cancel_kb()
-        )
-        return
-    
-    await state.update_data(preferred_date=preferred_date)
-    
-    # Показываем сводку заявки для подтверждения
-    await show_request_summary(message, state)
-
-
-# Функция показа сводки заявки
-async def show_request_summary(message: Message, state: FSMContext):
-    user_data = await state.get_data()
-    
-    async with AsyncSessionLocal() as session:
-        try:
-            # Получаем данные автомобиля
-            car_result = await session.execute(select(Car).where(Car.id == user_data['car_id']))
-            car = car_result.scalar_one_or_none()
-            
-            if not car:
-                await message.answer("❌ Автомобиль не найден")
-                await state.clear()
-                return
-            
-            # Формируем сводку
-            summary_text = (
-                "📋 <b>Сводка заявки</b>\n\n"
-                f"🚗 <b>Автомобиль:</b> {car.brand} {car.model}\n"
-                f"🛠️ <b>Услуга:</b> {user_data['service_type']}\n"
-                f"📝 <b>Описание:</b> {user_data['description']}\n"
-                f"🗓️ <b>Желаемая дата:</b> {user_data['preferred_date']}\n"
-            )
-            
-            if user_data.get('photo_file_id'):
-                # Проверяем тип медиа - отправляем отдельно от текста
-                try:
-                    # Пытаемся отправить как фото
-                    await message.answer_photo(
-                        photo=user_data['photo_file_id'],
-                        caption=summary_text,
-                        parse_mode="HTML",
-                        reply_markup=get_request_confirm_kb()
-                    )
-                except Exception as photo_error:
-                    # Если не фото, пробуем как видео
-                    try:
-                        await message.answer_video(
-                            video=user_data['photo_file_id'],
-                            caption=summary_text,
-                            parse_mode="HTML",
-                            reply_markup=get_request_confirm_kb()
-                        )
-                    except Exception as video_error:
-                        # Если и видео не получилось, отправляем только текст
-                        logging.warning(f"Не удалось отправить медиа в сводке: {photo_error}, {video_error}")
-                        summary_text += f"\n📎 <b>Медиафайл:</b> Прикреплен (не удалось отобразить)\n"
-                        await message.answer(
-                            summary_text,
-                            parse_mode="HTML",
-                            reply_markup=get_request_confirm_kb()
-                        )
-            else:
-                await message.answer(
-                    summary_text,
-                    parse_mode="HTML",
-                    reply_markup=get_request_confirm_kb()
-                )
-            
-            await state.set_state(RequestForm.confirm)
-            
-        except Exception as e:
-            logging.error(f"Ошибка при показе сводки: {e}")
-            await message.answer("❌ Ошибка при формировании заявки")
-            await state.clear()
-
-
-# Обработчик подтверждения заявки
-@router.callback_query(F.data == "confirm_request", RequestForm.confirm)
+# Подтверждение заявки
+@router.callback_query(RequestForm.confirm, F.data == "confirm_request")
 async def confirm_request(callback: CallbackQuery, state: FSMContext):
-    user_data = await state.get_data()
+    data = await state.get_data()
+    
+    car_id = data.get("car_id")
+    service_type = data.get("service_type")
+    description = data.get("description")
+    photos = data.get("photos", [])
     
     async with AsyncSessionLocal() as session:
         try:
-            # Получаем ID пользователя
+            # Получаем пользователя и автомобиль
             user_result = await session.execute(
                 select(User).where(User.telegram_id == callback.from_user.id)
             )
             user = user_result.scalar_one_or_none()
             
             if not user:
-                await callback.answer("❌ Пользователь не найден")
+                await callback.message.edit_text(
+                    "❌ Пользователь не найден. Начните с /start",
+                    reply_markup=get_main_kb()
+                )
                 await state.clear()
+                await callback.answer()
                 return
             
-            # Создаем заявку в БД
+            car_result = await session.execute(
+                select(Car).where(Car.id == car_id, Car.user_id == user.id)
+            )
+            car = car_result.scalar_one_or_none()
+            
+            if not car:
+                await callback.message.edit_text(
+                    "❌ Автомобиль не найден.",
+                    reply_markup=get_main_kb()
+                )
+                await state.clear()
+                await callback.answer()
+                return
+            
+            # Создаем заявку
             new_request = Request(
                 user_id=user.id,
-                car_id=user_data['car_id'],
-                service_type=user_data['service_type'],
-                description=user_data['description'],
-                photo_file_id=user_data.get('photo_file_id'),
-                preferred_date=user_data['preferred_date'],
-                status='new'
+                car_id=car.id,
+                service_type=service_type,
+                description=description,
+                photo_file_id=",".join(photos) if photos else None,
+                status="new"
             )
-            
             session.add(new_request)
             await session.commit()
             
-            # Получаем данные автомобиля для сообщения
-            car_result = await session.execute(select(Car).where(Car.id == user_data['car_id']))
-            car = car_result.scalar_one_or_none()
-            
-            success_text = (
-                "✅ <b>Заявка успешно создана!</b>\n\n"
-                f"📋 <b>Номер заявки:</b> #{new_request.id}\n"
-                f"🚗 <b>Автомобиль:</b> {car.brand} {car.model}\n"  
-                f"🛠️ <b>Услуга:</b> {user_data['service_type']}\n"
-                f"📝 <b>Описание:</b> {user_data['description']}\n"
-                f"🗓️ <b>Желаемая дата:</b> {user_data['preferred_date']}\n\n"
-                "🕐 <i>Менеджер свяжется с вами в ближайшее время для уточнения деталей.</i>"
-            )
-            
-            # Удаляем предыдущее сообщение и отправляем новое
-            await callback.message.delete()
-            await callback.message.answer(
-                success_text,
-                parse_mode="HTML",
-                reply_markup=get_main_kb()
-            )
-            
-            # Отправляем уведомление менеджеру
+            # Уведомляем менеджера
             try:
                 await notify_manager_about_new_request(callback.bot, new_request.id)
-            except Exception as e:
-                logging.error(f"Ошибка при отправке уведомления менеджеру: {e}")
+            except Exception as notify_error:
+                logging.error(f"❌ Ошибка при отправке уведомления менеджеру: {notify_error}")
             
+            await callback.message.edit_text(
+                "✅ Ваша заявка отправлена менеджеру!\n\n"
+                "Вам придет уведомление, когда менеджер начнет обработку.",
+                reply_markup=get_main_kb()
+            )
         except Exception as e:
             await session.rollback()
-            logging.error(f"Ошибка при сохранении заявки: {e}")
-            await callback.answer("❌ Ошибка при создании заявки")
-            try:
-                await callback.message.answer(
-                    "❌ Ошибка при создании заявки. Попробуйте снова.",
-                    reply_markup=get_main_kb()
-                )
-            except:
-                pass
-        finally:
-            await state.clear()
-    
+            logging.error(f"❌ Ошибка при сохранении заявки: {e}")
+            await callback.message.edit_text(
+                "❌ Ошибка при создании заявки. Попробуйте позже.",
+                reply_markup=get_main_kb()
+            )
+    await state.clear()
     await callback.answer()
 
 
-# Обработчик отмены заявки
-@router.callback_query(F.data == "cancel_request")
-async def cancel_request(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
+# Изменение заявки перед подтверждением (пока просто отмена и пересоздание)
+@router.callback_query(RequestForm.confirm, F.data == "edit_request")
+async def edit_request(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "❌ Создание заявки отменено",
+        "✏️ Редактирование заявки пока не реализовано.\n\n"
+        "Создайте заявку заново.",
         reply_markup=get_main_kb()
     )
+    await state.clear()
     await callback.answer()
+
+
+# Просмотр заявок пользователя
+@router.callback_query(F.data == "my_requests")
+async def my_requests(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "📋 Ваши заявки.\n\n"
+        "Выберите, что показать:",
+        reply_markup=get_history_kb()
+    )
+    await callback.answer()
+
+
+# История активных заявок
+@router.callback_query(F.data == "history_active")
+async def history_active(callback: CallbackQuery, state: FSMContext):
+    await show_requests_list(callback, filter_status="active")
+
+
+# История архивных заявок
+@router.callback_query(F.data == "history_archived")
+async def history_archived(callback: CallbackQuery, state: FSMContext):
+    await show_requests_list(callback, filter_status="archived")
+
+
+# Функция показа списка заявок
+async def show_requests_list(callback: CallbackQuery, filter_status: str = None):
+    async with AsyncSessionLocal() as session:
+        try:
+            user_id = callback.from_user.id
+            
+            # Получаем пользователя
+            user_result = await session.execute(select(User).where(User.telegram_id == user_id))
+            user = user_result.scalar_one_or_none()
+            
+            if not user:
+                await callback.message.edit_text("❌ Пользователь не найден. Начните с /start")
+                return
+            
+            # Получаем заявки
+            query = select(Request).where(Request.user_id == user.id)
+            
+            if filter_status == "active":
+                query = query.where(Request.status.in_(["new", "in_progress", "scheduled", "in_work", "to_pay"]))
+            elif filter_status == "archived":
+                query = query.where(Request.status.in_(["paid", "archived", "rejected"]))
+            
+            result = await session.execute(query)
+            requests = result.scalars().all()
+            
+            if not requests:
+                if filter_status == "active":
+                    text = "📋 У вас нет активных заявок."
+                elif filter_status == "archived":
+                    text = "📁 У вас нет архивных заявок."
+                else:
+                    text = "📋 У вас пока нет заявок."
+                
+                await callback.message.edit_text(
+                    text,
+                    reply_markup=get_history_kb()
+                )
+                return
+            
+            # Формируем список
+            lines = []
+            for req in requests:
+                status_emoji = {
+                    "new": "🆕",
+                    "in_progress": "🔄",
+                    "scheduled": "📅",
+                    "in_work": "🔧",
+                    "to_pay": "💰",
+                    "paid": "✅",
+                    "archived": "📁",
+                    "rejected": "❌"
+                }.get(req.status, "❔")
+                
+                lines.append(
+                    f"{status_emoji} Заявка #{req.id}: {req.service_type}\n"
+                    f"   Статус: {req.status}\n"
+                    f"   Описание: {req.description[:50]}{'...' if len(req.description) > 50 else ''}"
+                )
+            
+            await callback.message.edit_text(
+                "📋 Ваши заявки:\n\n" + "\n\n".join(lines),
+                reply_markup=get_history_kb()
+            )
+        except Exception as e:
+            logging.error(f"❌ Ошибка при загрузке списка заявок: {e}")
+            await callback.message.edit_text(
+                "❌ Ошибка при загрузке заявок. Попробуйте позже.",
+                reply_markup=get_main_kb()
+            )
+
+
+@router.callback_query(F.data.startswith("client_accept_offer:"))
+async def client_accept_offer(callback: CallbackQuery):
+    """Клиент подтверждает условия менеджера по заявке"""
+    try:
+        request_id = int(callback.data.split(":")[1])
+
+        async with AsyncSessionLocal() as session:
+            # Ищем пользователя по telegram_id
+            user_result = await session.execute(
+                select(User).where(User.telegram_id == callback.from_user.id)
+            )
+            user = user_result.scalar_one_or_none()
+            if not user:
+                await callback.answer("❌ Пользователь не найден. Начните с /start", show_alert=True)
+                return
+
+            # Ищем заявку этого пользователя
+            req_result = await session.execute(
+                select(Request).where(
+                    Request.id == request_id,
+                    Request.user_id == user.id,
+                )
+            )
+            request = req_result.scalar_one_or_none()
+            if not request:
+                await callback.answer("❌ Заявка не найдена", show_alert=True)
+                return
+
+            # Обновляем статус
+            request.status = "accepted"
+            await session.commit()
+
+            await callback.message.edit_text(
+                f"✅ Вы подтвердили условия по заявке #{request.id}.\n"
+                f"Менеджер свяжется с вами для дальнейших действий."
+            )
+
+            # Уведомляем менеджерскую группу
+            try:
+                await callback.bot.send_message(
+                    chat_id=config.MANAGER_CHAT_ID,
+                    text=(
+                        f"✅ Клиент подтвердил условия по заявке #{request.id}\n\n"
+                        f"Комментарий менеджера:\n{request.manager_comment or '—'}"
+                    ),
+                )
+            except Exception as e:
+                logging.error(f"❌ Не удалось уведомить менеджеров о принятии условий: {e}")
+
+            await callback.answer()
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка при подтверждении условий клиентом: {e}")
+        await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("client_reject_offer:"))
+async def client_reject_offer(callback: CallbackQuery):
+    """Клиент отклоняет условия менеджера по заявке"""
+    try:
+        request_id = int(callback.data.split(":")[1])
+
+        async with AsyncSessionLocal() as session:
+            # Ищем пользователя
+            user_result = await session.execute(
+                select(User).where(User.telegram_id == callback.from_user.id)
+            )
+            user = user_result.scalar_one_or_none()
+            if not user:
+                await callback.answer("❌ Пользователь не найден. Начните с /start", show_alert=True)
+                return
+
+            # Ищем заявку этого пользователя
+            req_result = await session.execute(
+                select(Request).where(
+                    Request.id == request_id,
+                    Request.user_id == user.id,
+                )
+            )
+            request = req_result.scalar_one_or_none()
+            if not request:
+                await callback.answer("❌ Заявка не найдена", show_alert=True)
+                return
+
+            # Можно пометить как rejected или оставить new — для MVP пометим rejected
+            request.status = "rejected"
+            await session.commit()
+
+            await callback.message.edit_text(
+                f"❌ Вы отклонили условия по заявке #{request.id}.\n"
+                f"Если хотите, можете создать новую заявку или дождаться других вариантов."
+            )
+
+            # Уведомляем менеджерскую группу
+            try:
+                await callback.bot.send_message(
+                    chat_id=config.MANAGER_CHAT_ID,
+                    text=(
+                        f"❌ Клиент отклонил условия по заявке #{request.id}\n\n"
+                        f"Комментарий менеджера:\n{request.manager_comment or '—'}"
+                    ),
+                )
+            except Exception as e:
+                logging.error(f"❌ Не удалось уведомить менеджеров об отказе: {e}")
+
+            await callback.answer()
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка при отказе от условий клиентом: {e}")
+        await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)

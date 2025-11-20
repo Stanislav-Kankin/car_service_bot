@@ -16,110 +16,171 @@ def get_main_kb():
     )
     builder.row(
         InlineKeyboardButton(
-            text="📊 История заявок", callback_data="request_history")
+            text="📋 Мои заявки", callback_data="my_requests"),
+        InlineKeyboardButton(
+            text="ℹ️ Помощь", callback_data="help")
     )
     return builder.as_markup()
 
 
-# Клавиатура для регистрации
+# Клавиатура регистрации
 def get_registration_kb():
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="✅ Зарегистрироваться", callback_data="start_registration")
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text="❌ Отменить", callback_data="cancel_registration")
-    )
+    builder.row(InlineKeyboardButton(
+        text="📝 Зарегистрироваться", callback_data="start_registration"))
+    builder.row(InlineKeyboardButton(
+        text="🚫 Не сейчас", callback_data="skip_registration"))
     return builder.as_markup()
 
 
-# Красивая Reply-клавиатура для номера телефона
+# Клавиатура запроса телефона (реплай)
 def get_phone_reply_kb():
     builder = ReplyKeyboardBuilder()
-    builder.row(
-        KeyboardButton(
-            text="📱 Отправить мой номер", request_contact=True)
-    )
-    builder.row(
-        KeyboardButton(
-            text="❌ Отменить")
-    )
+    builder.row(KeyboardButton(
+        text="📱 Отправить номер телефона", request_contact=True))
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
 
-# Клавиатура для отмены действий (инлайн)
-def get_cancel_kb():
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_action")
-    )
-    return builder.as_markup()
-
-
-# Клавиатура для раздела "Мой гараж"
+# Клавиатура "Мой гараж"
 def get_garage_kb():
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="➕ Добавить авто", callback_data="add_car"),
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")
+        InlineKeyboardButton(
+            text="➕ Добавить автомобиль", callback_data="add_car")
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ В меню", callback_data="back_to_main")
     )
     return builder.as_markup()
 
 
-# Клавиатура для управления конкретным авто
+# Клавиатура управления конкретным авто
 def get_car_management_kb(car_id: int):
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="📝 Создать заявку", callback_data=f"create_request:{car_id}"),
-        InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit_car:{car_id}")
+        InlineKeyboardButton(
+            text="📝 Создать заявку", callback_data=f"create_request_for_car:{car_id}")
     )
     builder.row(
-        InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"delete_car:{car_id}"),
-        InlineKeyboardButton(text="⬅️ Назад в гараж", callback_data="my_garage")
+        InlineKeyboardButton(
+            text="✏️ Редактировать авто", callback_data=f"edit_car:{car_id}"),
+        InlineKeyboardButton(
+            text="🗑 Удалить авто", callback_data=f"delete_car:{car_id}")
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад к списку", callback_data="my_garage")
     )
     return builder.as_markup()
 
 
-# Клавиатура для подтверждения удаления
-def get_delete_confirm_kb(car_id: int):
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete:{car_id}"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_delete:{car_id}")
-    )
-    return builder.as_markup()
-
-
-# Клавиатура для отмены в процессе добавления авто
+# Клавиатура отмены при создании/редактировании авто
 def get_car_cancel_kb():
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_car_add")
+        InlineKeyboardButton(
+            text="❌ Отменить", callback_data="cancel_car_action")
     )
     return builder.as_markup()
 
 
-# Клавиатура для выбора типа услуги
 def get_service_types_kb():
+    """
+    Главное меню выбора вида работ для заявки.
+    Список согласован с заказчиком (Автомойки, Шиномонтаж, Автоэлектрик и т.д.).
+    """
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="⛽ Топливо", callback_data="service_fuel"),
-        InlineKeyboardButton(text="🧼 Автомойка", callback_data="service_wash")
+        InlineKeyboardButton(text="🧼 Автомойки", callback_data="service_group_wash"),
+        InlineKeyboardButton(text="🛞 Шиномонтаж", callback_data="service_group_tire"),
     )
     builder.row(
-        InlineKeyboardButton(text="🛞 Помощь в дороге", callback_data="service_roadside"),
-        InlineKeyboardButton(text="🔧 СТО", callback_data="service_sto")
+        InlineKeyboardButton(text="⚡ Автоэлектрик", callback_data="service_group_electric"),
+        InlineKeyboardButton(text="🔧 Слесарные работы", callback_data="service_group_mechanic"),
     )
     builder.row(
-        InlineKeyboardButton(text="🛞 Запчасти", callback_data="service_parts"),
-        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request")
+        InlineKeyboardButton(text="🎨 Малярные работы", callback_data="service_group_paint"),
+        InlineKeyboardButton(text="🛠️ Техобслуживание", callback_data="service_group_maint"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⚙️ Ремонт агрегатов", callback_data="service_group_aggregates"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request"),
     )
     return builder.as_markup()
 
 
-# Клавиатура для пропуска фото
+def get_tire_subtypes_kb():
+    """
+    Подтипы для шиномонтажа: стационарный сервис и выездной.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="🏁 Шиномонтаж (на СТО)",
+            callback_data="service_tire_stationary",
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🚐 Выездной шиномонтаж",
+            callback_data="service_tire_mobile",
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="service_back_to_groups"),
+        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request"),
+    )
+    return builder.as_markup()
+
+
+def get_electric_subtypes_kb():
+    """
+    Подтипы для автоэлектрика: на сервисе и выездной мастер.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="⚡ Автоэлектрик (на СТО)",
+            callback_data="service_electric_stationary",
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🚐 Выездной автоэлектрик",
+            callback_data="service_electric_mobile",
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="service_back_to_groups"),
+        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request"),
+    )
+    return builder.as_markup()
+
+
+def get_aggregates_subtypes_kb():
+    """
+    Подтипы для ремонта агрегатов: турбина, стартер, генератор, рулевая рейка.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🌀 Турбина", callback_data="service_agg_turbo"),
+        InlineKeyboardButton(text="🔋 Стартер", callback_data="service_agg_starter"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⚡ Генератор", callback_data="service_agg_generator"),
+        InlineKeyboardButton(text="🛞 Рулевая рейка", callback_data="service_agg_steering"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="service_back_to_groups"),
+        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request"),
+    )
+    return builder.as_markup()
+
+
+# Клавиатура для фото (прикрепить / пропустить)
 def get_photo_skip_kb():
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -136,133 +197,149 @@ def get_photo_skip_kb():
 def get_request_confirm_kb():
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✅ Отправить заявку", callback_data="confirm_request"),
-        InlineKeyboardButton(text="✏️ Исправить", callback_data="edit_request")
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_request"),
+        InlineKeyboardButton(text="✏️ Изменить", callback_data="edit_request")
     )
     builder.row(
-        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request")
+        InlineKeyboardButton(text="❌ Отменить заявку", callback_data="cancel_request")
     )
     return builder.as_markup()
 
 
-# Клавиатура для менеджера (под каждой заявкой)
-def get_manager_request_kb(request_id: int):
+# Клавиатура подтверждения удаления авто
+def get_delete_confirm_kb():
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✅ Принять", callback_data=f"manager_accept:{request_id}"),
-        InlineKeyboardButton(text="✏️ Уточнить", callback_data=f"manager_clarify:{request_id}")
-    )
-    builder.row(
-        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"manager_reject:{request_id}"),
-        InlineKeyboardButton(text="📞 Позвонить", callback_data=f"manager_call:{request_id}")
+        InlineKeyboardButton(
+            text="✅ Да, удалить", callback_data="confirm_delete_car"),
+        InlineKeyboardButton(
+            text="❌ Отменить", callback_data="cancel_delete_car")
     )
     return builder.as_markup()
 
 
-# Клавиатура для отмены действия менеджером
-def get_manager_cancel_kb():
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="❌ Отменить", callback_data="manager_cancel")
-    )
-    return builder.as_markup()
-
-
-# Клавиатура для истории заявок
+# Клавиатура истории заявок
 def get_history_kb():
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="🆕 Новые", callback_data="filter_new"),
-        InlineKeyboardButton(text="✅ Принятые", callback_data="filter_accepted"),
-        InlineKeyboardButton(text="⏳ В работе", callback_data="filter_in_progress")
+        InlineKeyboardButton(text="📅 Активные", callback_data="history_active"),
+        InlineKeyboardButton(text="📁 Архив", callback_data="history_archived")
     )
     builder.row(
-        InlineKeyboardButton(text="📋 Все заявки", callback_data="filter_all"),
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")
     )
     return builder.as_markup()
 
 
-# Клавиатура для детального просмотра заявки
-def get_request_detail_kb(request_id: int, back_to: str = "history"):
+# Клавиатура отмены редактирования
+def get_edit_cancel_kb():
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data=back_to),
-        InlineKeyboardButton(text="📋 К списку", callback_data="request_history")
+        InlineKeyboardButton(
+            text="❌ Отменить", callback_data="cancel_edit")
     )
     return builder.as_markup()
 
 
-# Клавиатура для навигации по заявкам
-def get_requests_navigation_kb(requests_ids: list, current_index: int, back_to: str = "history"):
-    builder = InlineKeyboardBuilder()
-    
-    if current_index > 0:
-        builder.row(
-            InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"view_request:{requests_ids[current_index - 1]}")
-        )
-    
-    builder.row(
-        InlineKeyboardButton(text="📋 К списку", callback_data="request_history")
-    )
-    
-    if current_index < len(requests_ids) - 1:
-        builder.row(
-            InlineKeyboardButton(text="Следующая ➡️", callback_data=f"view_request:{requests_ids[current_index + 1]}")
-        )
-    
-    return builder.as_markup()
+# ==============================
+# Панель менеджера (инлайн)
+# ==============================
 
-
-# Клавиатура для отмены редактирования авто
-def get_edit_cancel_kb(car_id: int):
+def get_manager_main_kb():
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="❌ Отменить редактирование", callback_data=f"cancel_edit:{car_id}")
+        InlineKeyboardButton(
+            text="📥 Новые заявки", callback_data="manager_new_requests"),
+        InlineKeyboardButton(
+            text="🔄 В обработке", callback_data="manager_in_progress")
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="📅 Записи", callback_data="manager_scheduled"),
+        InlineKeyboardButton(
+            text="📁 Архив", callback_data="manager_archive")
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⚙️ Настройки", callback_data="manager_settings")
     )
     return builder.as_markup()
 
-# Клавиатура панели менеджера
+
+# Обратная совместимость со старым кодом
 def get_manager_panel_kb():
+    """
+    Старое имя функции, оставлено для совместимости.
+    Сейчас просто проксируем на get_manager_main_kb().
+    """
+    return get_manager_main_kb()
+
+
+
+# Клавиатура управления конкретной заявкой для менеджера
+def get_manager_request_kb(request_id: int):
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="📋 Все заявки", callback_data="manager_all_requests"),
-        InlineKeyboardButton(text="🆕 Новые", callback_data="manager_new_requests")
+        InlineKeyboardButton(
+            text="👀 Подробнее", callback_data=f"manager_view_request:{request_id}")
     )
     builder.row(
-        InlineKeyboardButton(text="⏳ В работе", callback_data="manager_in_progress"),
-        InlineKeyboardButton(text="✅ Завершенные", callback_data="manager_completed")
-    )
-    builder.row(
-        InlineKeyboardButton(text="📊 Статистика", callback_data="manager_stats"),
-        InlineKeyboardButton(text="🔍 Поиск", callback_data="manager_search")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_main_menu")
-    )
-    builder.row(
-        InlineKeyboardButton(text="❌ Отклоненные", callback_data="manager_rejected")
+        InlineKeyboardButton(
+            text="✅ Взять в работу", callback_data=f"manager_take_request:{request_id}"),
+        InlineKeyboardButton(
+            text="❌ Отклонить", callback_data=f"manager_reject_request:{request_id}")
     )
     return builder.as_markup()
 
-# Клавиатура для заявки в панели менеджера
-def get_manager_request_detail_kb(request_id: int):
+
+# Клавиатура смены статуса заявки для менеджера
+def get_manager_status_kb(request_id: int, current_status: str):
     builder = InlineKeyboardBuilder()
+    
+    if current_status == "new":
+        builder.row(
+            InlineKeyboardButton(
+                text="🔄 В обработке", callback_data=f"manager_set_status:{request_id}:in_progress"),
+            InlineKeyboardButton(
+                text="❌ Отклонить", callback_data=f"manager_set_status:{request_id}:rejected")
+        )
+    elif current_status == "in_progress":
+        builder.row(
+            InlineKeyboardButton(
+                text="📅 Записать", callback_data=f"manager_set_status:{request_id}:scheduled"),
+            InlineKeyboardButton(
+                text="❌ Отклонить", callback_data=f"manager_set_status:{request_id}:rejected")
+        )
+        builder.row(
+            InlineKeyboardButton(
+                text="🔧 В работе", callback_data=f"manager_set_status:{request_id}:in_work")
+        )
+    elif current_status == "in_work":
+        builder.row(
+            InlineKeyboardButton(
+                text="💰 К оплате", callback_data=f"manager_set_status:{request_id}:to_pay")
+        )
+    elif current_status == "to_pay":
+        builder.row(
+            InlineKeyboardButton(
+                text="✅ Оплачено", callback_data=f"manager_set_status:{request_id}:paid")
+        )
+    elif current_status in ["paid", "rejected"]:
+        builder.row(
+            InlineKeyboardButton(
+                text="📁 В архив", callback_data=f"manager_set_status:{request_id}:archived")
+        )
+    
     builder.row(
-        InlineKeyboardButton(text="⏳ В работу", callback_data=f"manager_set_in_progress:{request_id}"),
-        InlineKeyboardButton(text="✅ Завершить", callback_data=f"manager_set_completed:{request_id}")
+        InlineKeyboardButton(
+            text="⬅️ Назад", callback_data=f"manager_view_request:{request_id}")
     )
-    builder.row(
-        InlineKeyboardButton(text="✏️ Комментарий", callback_data=f"manager_add_comment:{request_id}"),
-        InlineKeyboardButton(text="📞 Позвонить", callback_data=f"manager_call:{request_id}")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_all_requests")
-    )
+    
     return builder.as_markup()
 
-# Клавиатура навигации по заявкам для менеджера
-def get_manager_requests_navigation_kb(requests_ids: list, current_index: int):
+
+# Клавиатура списка заявок для менеджера (пагинация)
+def get_manager_requests_list_kb(requests_ids, current_index: int):
     builder = InlineKeyboardBuilder()
     
     if current_index > 0:
@@ -280,4 +357,3 @@ def get_manager_requests_navigation_kb(requests_ids: list, current_index: int):
         )
     
     return builder.as_markup()
-

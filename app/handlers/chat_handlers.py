@@ -42,9 +42,15 @@ async def handle_chat_actions(callback: CallbackQuery):
         await callback.answer("❌ Произошла ошибка")
 
 
+# Проверка прав менеджера
 async def is_manager(telegram_id: int) -> bool:
     """Проверяет, является ли пользователь менеджером"""
-    return str(telegram_id) == config.ADMIN_USER_ID
+    admin_id = getattr(config, "ADMIN_USER_ID", None)
+    logging.info(f"[chat is_manager] telegram_id={telegram_id}, ADMIN_USER_ID={admin_id!r}")
+    try:
+        return int(telegram_id) == int(admin_id)
+    except (TypeError, ValueError):
+        return False
 
 
 async def accept_request(callback: CallbackQuery, request_id: int):

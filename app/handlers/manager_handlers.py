@@ -37,9 +37,18 @@ async def cmd_manager(message: Message):
         reply_markup=get_manager_panel_kb()
     )
 
+
+# Проверка на менеджера
 async def is_manager(telegram_id: int) -> bool:
     """Проверяет, является ли пользователь менеджером"""
-    return str(telegram_id) == config.ADMIN_USER_ID
+    admin_id = getattr(config, "ADMIN_USER_ID", None)
+    logging.info(f"[is_manager] telegram_id={telegram_id}, ADMIN_USER_ID={admin_id!r}")
+    try:
+        return int(telegram_id) == int(admin_id)
+    except (TypeError, ValueError):
+        return False
+
+
 
 # Обработчики фильтров для менеджера
 @router.callback_query(F.data.startswith("manager_"))
@@ -509,52 +518,98 @@ async def manager_add_comment(callback: CallbackQuery, state: FSMContext):
 # Обработчик текста комментария
 @router.message(ManagerStates.waiting_manager_comment, F.text)
 async def process_manager_comment(message: Message, state: FSMContext):
-    """Обработка комментария менеджера"""
+    """Обработка комментария менеджера (как предложение условий для клиента)"""
     try:
         user_data = await state.get_data()
-        request_id = user_data['request_id']
+        request_id = user_data["request_id"]
         comment_text = message.text.strip()
-        
+
         if not comment_text:
             await message.answer("❌ Комментарий не может быть пустым. Попробуйте еще раз:")
             return
-        
+
         logging.info(f"🔧 Сохранение комментария для заявки #{request_id}: {comment_text}")
-        
+
         async with AsyncSessionLocal() as session:
             try:
-                # Получаем заявку
+                # Получаем заявку и пользователя
                 request_result = await session.execute(
-                    select(Request).where(Request.id == request_id)
+                    select(Request, User)
+                    .join(User, Request.user_id == User.id)
+                    .where(Request.id == request_id)
                 )
-                request = request_result.scalar_one_or_none()
-                
-                if request:
-                    request.manager_comment = comment_text
-                    await session.commit()
-                    
-                    logging.info(f"✅ Комментарий сохранен для заявки #{request_id}")
-                    
-                    await message.answer(
-                        f"✅ Комментарий добавлен к заявке #{request_id}",
-                        reply_markup=InlineKeyboardBuilder().row(
-                            InlineKeyboardButton(text="⬅️ Назад к заявке", callback_data=f"manager_view_request:{request_id}")
-                        ).as_markup()
-                    )
-                else:
+                row = request_result.first()
+
+                if not row:
                     await message.answer("❌ Заявка не найдена")
-                    
-            except Exception as e:
+                    await state.clear()
+                    return
+
+                request, user = row
+
+                # Сохраняем комментарий менеджера
+                request.manager_comment = comment_text
+                await session.commit()
+
+                logging.info(f"✅ Комментарий сохранен для заявки #{request_id}")
+
+                # Ответ менеджеру
+                await message.answer(
+                    f"✅ Комментарий добавлен к заявке #{request_id}",
+                    reply_markup=InlineKeyboardBuilder()
+                    .row(
+                        InlineKeyboardButton(
+                            text="⬅️ Назад к заявке",
+                            callback_data=f"manager_view_request:{request_id}",
+                        )
+                    )
+                    .as_markup(),
+                )
+
+                # Отправляем клиенту предложение с кнопками
+                try:
+                    from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardButton
+
+                    kb = InlineKeyboardBuilder()
+                    kb.row(
+                        InlineKeyboardButton(
+                            text="✅ Подтвердить условия",
+                            callback_data=f"client_accept_offer:{request.id}",
+                        ),
+                        InlineKeyboardButton(
+                            text="❌ Отказаться",
+                            callback_data=f"client_reject_offer:{request.id}",
+                        ),
+                    )
+
+                    offer_text = (
+                        f"💬 <b>Комментарий от менеджера по вашей заявке #{request.id}</b>\n\n"
+                        f"{comment_text}\n\n"
+                        "Подтвердите, если вас устраивают условия."
+                    )
+
+                    await message.bot.send_message(
+                        chat_id=user.telegram_id,
+                        text=offer_text,
+                        parse_mode="HTML",
+                        reply_markup=kb.as_markup(),
+                    )
+                except Exception as send_err:
+                    logging.error(
+                        f"❌ Не удалось отправить комментарий клиенту по заявке #{request_id}: {send_err}"
+                    )
+
+            except Exception as db_err:
                 await session.rollback()
-                logging.error(f"❌ Ошибка сохранения комментария в БД: {e}")
+                logging.error(f"❌ Ошибка сохранения комментария в БД: {db_err}")
                 await message.answer("❌ Ошибка при сохранении комментария")
-        
+
         await state.clear()
-        
+
     except Exception as e:
-        logging.error(f"❌ Общая ошибка обработки комментария: {e}")
-        await message.answer("❌ Произошла ошибка при обработке комментария")
-        await state.clear()
+        logging.error(f"❌ Ошибка обработки комментария менеджера: {e}")
+        await message.answer("❌ Ошибка при обработке комментария")
+
 
 
 @router.callback_query(F.data.startswith("manager_view_request:"), ManagerStates.waiting_manager_comment)
