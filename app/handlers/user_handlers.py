@@ -1173,26 +1173,54 @@ async def process_photo(message: Message, state: FSMContext):
 # Пропуск прикрепления фото
 @router.callback_query(RequestForm.photo, F.data == "skip_photo")
 async def skip_photo(callback: CallbackQuery, state: FSMContext):
+    """
+    После этапа с фото спрашиваем, когда удобно клиенту (дата/время).
+    """
+    await callback.message.edit_text(
+        "⏰ Когда вам удобно выполнить работу?\n\n"
+        "Напишите удобное время в свободной форме, например:\n"
+        "• «Сегодня после 18:00»\n"
+        "• «Завтра утром»\n"
+        "• «В выходные, любой день»\n"
+        "• или конкретную дату и время.",
+        reply_markup=get_car_cancel_kb(),
+    )
+    await state.set_state(RequestForm.preferred_date)
+    await callback.answer()
+
+
+@router.message(RequestForm.preferred_date)
+async def process_preferred_date(message: Message, state: FSMContext):
+    """
+    Сохраняем пожелания по времени и показываем итоговую сводку заявки.
+    """
+    preferred = (message.text or "").strip()
+    if len(preferred) < 3:
+        await message.answer(
+            "❌ Слишком короткий ответ. Пожалуйста, укажите, когда вам удобно:",
+            reply_markup=get_car_cancel_kb(),
+        )
+        return
+
+    await state.update_data(preferred_date=preferred)
     data = await state.get_data()
-    
+
     service_type = data.get("service_type", "Не указано")
     description = data.get("description", "Не указано")
     photos = data.get("photos", [])
-    
     photos_text = f"{len(photos)} шт." if photos else "нет"
-    
-    # Переходим к подтверждению заявки
-    await callback.message.edit_text(
+
+    await message.answer(
         "📄 Заявка на услугу\n\n"
         f"🚗 Авто: будет показано менеджеру по ID\n"
         f"🔧 Услуга: {service_type}\n"
         f"📝 Описание: {description}\n"
-        f"📷 Фото: {photos_text}\n\n"
+        f"📷 Фото: {photos_text}\n"
+        f"⏰ Когда удобно: {preferred}\n\n"
         "Подтвердите создание заявки:",
-        reply_markup=get_request_confirm_kb()
+        reply_markup=get_request_confirm_kb(),
     )
     await state.set_state(RequestForm.confirm)
-    await callback.answer()
 
 
 # Подтверждение заявки
@@ -1204,6 +1232,7 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
     service_type = data.get("service_type")
     description = data.get("description")
     photos = data.get("photos", [])
+    preferred_date = data.get("preferred_date")
     
     async with AsyncSessionLocal() as session:
         try:
@@ -1245,6 +1274,7 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
                 photo_file_id=",".join(photos) if photos else None,
                 status="new"
             )
+
             session.add(new_request)
             await session.commit()
             
@@ -1384,13 +1414,13 @@ async def client_accept_offer(callback: CallbackQuery):
         request_id = int(callback.data.split(":")[1])
 
         async with AsyncSessionLocal() as session:
-            # Ищем пользователя по telegram_id
+            # Ищем пользователя
             user_result = await session.execute(
                 select(User).where(User.telegram_id == callback.from_user.id)
             )
             user = user_result.scalar_one_or_none()
             if not user:
-                await callback.answer("❌ Пользователь не найден. Начните с /start", show_alert=True)
+                await callback.answer("❌ Пользователь не найден. Нажмите /start", show_alert=True)
                 return
 
             # Ищем заявку этого пользователя
@@ -1409,24 +1439,33 @@ async def client_accept_offer(callback: CallbackQuery):
             request.status = "accepted"
             await session.commit()
 
-            await callback.message.edit_text(
-                f"✅ Вы подтвердили условия по заявке #{request.id}.\n"
-                f"Менеджер свяжется с вами для дальнейших действий."
+        # Меняем текст у клиента
+        await callback.message.edit_text(
+            f"✅ Вы подтвердили условия по заявке #{request_id}.\n"
+            f"Менеджер свяжется с вами для записи и выполнения работ."
+        )
+
+        # Уведомляем менеджерскую группу
+        try:
+            await callback.bot.send_message(
+                chat_id=config.MANAGER_CHAT_ID,
+                text=(
+                    f"✅ Клиент подтвердил условия по заявке #{request_id}\n\n"
+                    f"Комментарий менеджера:\n"
+                    f"{request.manager_comment or '—'}"
+                ),
             )
+        except Exception as e:
+            logging.error(f"❌ Не удалось уведомить менеджеров о принятии условий: {e}")
 
-            # Уведомляем менеджерскую группу
-            try:
-                await callback.bot.send_message(
-                    chat_id=config.MANAGER_CHAT_ID,
-                    text=(
-                        f"✅ Клиент подтвердил условия по заявке #{request.id}\n\n"
-                        f"Комментарий менеджера:\n{request.manager_comment or '—'}"
-                    ),
-                )
-            except Exception as e:
-                logging.error(f"❌ Не удалось уведомить менеджеров о принятии условий: {e}")
+        # Обновляем клавиатуру в чате заявки (теперь появятся кнопки статусов)
+        try:
+            from app.handlers.chat_handlers import update_chat_keyboard
+            await update_chat_keyboard(callback.bot, request_id)
+        except Exception as e:
+            logging.error(f"❌ Не удалось обновить клавиатуру в чате заявки: {e}")
 
-            await callback.answer()
+        await callback.answer()
 
     except Exception as e:
         logging.error(f"❌ Ошибка при подтверждении условий клиентом: {e}")
@@ -1446,7 +1485,7 @@ async def client_reject_offer(callback: CallbackQuery):
             )
             user = user_result.scalar_one_or_none()
             if not user:
-                await callback.answer("❌ Пользователь не найден. Начните с /start", show_alert=True)
+                await callback.answer("❌ Пользователь не найден. Нажмите /start", show_alert=True)
                 return
 
             # Ищем заявку этого пользователя
@@ -1461,28 +1500,36 @@ async def client_reject_offer(callback: CallbackQuery):
                 await callback.answer("❌ Заявка не найдена", show_alert=True)
                 return
 
-            # Можно пометить как rejected или оставить new — для MVP пометим rejected
+            # Помечаем как отклонённую
             request.status = "rejected"
             await session.commit()
 
-            await callback.message.edit_text(
-                f"❌ Вы отклонили условия по заявке #{request.id}.\n"
-                f"Если хотите, можете создать новую заявку или дождаться других вариантов."
+        await callback.message.edit_text(
+            f"❌ Вы отклонили условия по заявке #{request_id}.\n"
+            f"Если хотите, вы можете создать новую заявку."
+        )
+
+        # Уведомляем менеджеров
+        try:
+            await callback.bot.send_message(
+                chat_id=config.MANAGER_CHAT_ID,
+                text=(
+                    f"❌ Клиент отклонил условия по заявке #{request_id}\n\n"
+                    f"Комментарий менеджера:\n"
+                    f"{request.manager_comment or '—'}"
+                ),
             )
+        except Exception as e:
+            logging.error(f"❌ Не удалось уведомить менеджеров об отказе: {e}")
 
-            # Уведомляем менеджерскую группу
-            try:
-                await callback.bot.send_message(
-                    chat_id=config.MANAGER_CHAT_ID,
-                    text=(
-                        f"❌ Клиент отклонил условия по заявке #{request.id}\n\n"
-                        f"Комментарий менеджера:\n{request.manager_comment or '—'}"
-                    ),
-                )
-            except Exception as e:
-                logging.error(f"❌ Не удалось уведомить менеджеров об отказе: {e}")
+        # Чистим кнопки в чате заявки
+        try:
+            from app.handlers.chat_handlers import update_chat_keyboard
+            await update_chat_keyboard(callback.bot, request_id)
+        except Exception as e:
+            logging.error(f"❌ Не удалось обновить клавиатуру в чате заявки: {e}")
 
-            await callback.answer()
+        await callback.answer()
 
     except Exception as e:
         logging.error(f"❌ Ошибка при отказе от условий клиентом: {e}")

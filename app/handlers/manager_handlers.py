@@ -297,114 +297,135 @@ async def show_manager_requests_list(callback: CallbackQuery, filter_status: str
                 reply_markup=get_manager_panel_kb()
             )
 
+
 async def show_manager_request_detail(callback: CallbackQuery, request_id: int):
-    """Показывает детальную информацию о заявке"""
+    """
+    Детальная карточка заявки для /manager:
+    – кнопки зависят от статуса заявки
+    – из статуса NEW убираем «В работу», пока клиент не подтвердил
+    """
     async with AsyncSessionLocal() as session:
         try:
             logging.info(f"🔧 Загрузка деталей заявки #{request_id}")
-            
-            # Получаем заявку с связанными данными
-            request_result = await session.execute(
+
+            # Получаем заявку + клиента + машину
+            result = await session.execute(
                 select(Request, User, Car)
                 .join(User, Request.user_id == User.id)
                 .join(Car, Request.car_id == Car.id)
                 .where(Request.id == request_id)
             )
-            result = request_result.first()
-            
-            if not result:
-                await callback.answer("❌ Заявка не найдена")
+            row = result.first()
+
+            if not row:
+                await callback.answer("❌ Заявка не найдена", show_alert=True)
                 return
-            
-            request, user, car = result
-            
-            # Формируем детальную информацию
+
+            request, user, car = row
+
             status_texts = {
                 "new": "🆕 Новая",
                 "accepted": "✅ Принята",
-                "in_progress": "⏳ В работе", 
+                "in_progress": "⏳ В работе",
+                "completed": "✅ Завершена",
                 "rejected": "❌ Отклонена",
-                "completed": "🏁 Завершена"
+                "to_pay": "💰 К оплате",
             }
-            
+            status_text = status_texts.get(request.status or "new", request.status or "❔")
+
+            created_at = request.created_at.strftime("%d.%m.%Y %H:%M") if request.created_at else "—"
+            accepted_at = request.accepted_at.strftime("%d.%m.%Y %H:%M") if request.accepted_at else "—"
+            in_progress_at = request.in_progress_at.strftime("%d.%m.%Y %H:%M") if request.in_progress_at else "—"
+            completed_at = request.completed_at.strftime("%d.%m.%Y %H:%M") if request.completed_at else "—"
+            rejected_at = request.rejected_at.strftime("%d.%m.%Y %H:%M") if request.rejected_at else "—"
+
             detail_text = (
                 f"📋 <b>Заявка #{request.id}</b>\n\n"
-                f"👤 <b>Клиент:</b> {user.full_name}\n"
-                f"📞 <b>Телефон:</b> {user.phone_number or 'Не указан'}\n"
-                f"🆔 <b>ID пользователя:</b> {user.telegram_id}\n\n"
+                f"👤 <b>Клиент:</b> {user.full_name or '—'}\n"
+                f"📞 <b>Телефон:</b> {user.phone_number or '—'}\n"
+                f"🆔 <b>ID пользователя:</b> <code>{user.telegram_id}</code>\n\n"
                 f"🚗 <b>Автомобиль:</b>\n"
                 f"   • Марка: {car.brand}\n"
                 f"   • Модель: {car.model}\n"
-                f"   • Год: {car.year or 'Не указан'}\n"
-                f"   • Госномер: {car.license_plate or 'Не указан'}\n\n"
+                f"   • Год: {car.year}\n"
+                f"   • Госномер: {car.license_plate}\n\n"
                 f"🛠️ <b>Услуга:</b> {request.service_type}\n\n"
                 f"📝 <b>Описание:</b>\n{request.description}\n\n"
+                f"📊 <b>Статус:</b> {status_text}\n"
+                f"📅 <b>Создана:</b> {created_at}\n"
+                f"✅ <b>Принята:</b> {accepted_at}\n"
+                f"⏳ <b>В работе:</b> {in_progress_at}\n"
+                f"🏁 <b>Завершена:</b> {completed_at}\n"
+                f"❌ <b>Отклонена:</b> {rejected_at}\n\n"
+                f"💬 <b>Комментарий менеджера:</b>\n"
+                f"{request.manager_comment or '—'}"
             )
-            
-            if request.preferred_date:
-                detail_text += f"🗓️ <b>Желаемая дата:</b> {request.preferred_date}\n\n"
-            
-            # Добавляем временные метки
-            detail_text += f"⏰ <b>Создана:</b> {request.created_at.strftime('%d.%m.%Y %H:%M')}\n"
-            detail_text += f"📊 <b>Статус:</b> {status_texts.get(request.status, request.status)}\n"
-            
-            # Добавляем время изменения статусов
-            if request.accepted_at:
-                detail_text += f"✅ <b>Принята:</b> {request.accepted_at.strftime('%d.%m.%Y %H:%M')}\n"
-            if request.in_progress_at:
-                detail_text += f"⏳ <b>В работе:</b> {request.in_progress_at.strftime('%d.%m.%Y %H:%M')}\n"
-            if request.completed_at:
-                detail_text += f"🏁 <b>Завершена:</b> {request.completed_at.strftime('%d.%m.%Y %H:%M')}\n"
-            if request.rejected_at:
-                detail_text += f"❌ <b>Отклонена:</b> {request.rejected_at.strftime('%d.%m.%Y %H:%M')}\n"
-            
-            # Если есть комментарий менеджера
-            if request.manager_comment:
-                detail_text += f"\n💬 <b>Комментарий менеджера:</b>\n{request.manager_comment}\n"
-            
-            # Создаем клавиатуру с действиями
+
             builder = InlineKeyboardBuilder()
-            
-            # Кнопки действий в зависимости от статуса
-            if request.status == 'new':
+
+            # ЛОГИКА КНОПОК В ЗАВИСИМОСТИ ОТ СТАТУСА
+            #
+            # new       – можно только ПРИНЯТЬ или ОТКЛОНИТЬ (НО НЕ "В РАБОТУ")
+            # accepted  – клиент подтвердил, теперь можно "В РАБОТУ" или "ОТКЛОНИТЬ"
+            # in_progress – только "ЗАВЕРШИТЬ"
+            # rejected/completed – только комментарий и назад
+            if request.status == "new":
                 builder.row(
-                    InlineKeyboardButton(text="✅ Принять", callback_data=f"chat_accept:{request.id}"),
-                    InlineKeyboardButton(text="⏳ В работу", callback_data=f"chat_in_progress:{request.id}")
+                    InlineKeyboardButton(
+                        text="✅ Принять",
+                        callback_data=f"chat_accept:{request.id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Отклонить",
+                        callback_data=f"chat_reject:{request.id}",
+                    ),
                 )
+            elif request.status == "accepted":
                 builder.row(
-                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"chat_reject:{request.id}")
+                    InlineKeyboardButton(
+                        text="⏳ В работу",
+                        callback_data=f"chat_in_progress:{request.id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Отклонить",
+                        callback_data=f"chat_reject:{request.id}",
+                    ),
                 )
-            elif request.status == 'accepted':
+            elif request.status == "in_progress":
                 builder.row(
-                    InlineKeyboardButton(text="⏳ В работу", callback_data=f"chat_in_progress:{request.id}"),
-                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"chat_reject:{request.id}")
+                    InlineKeyboardButton(
+                        text="✅ Завершить",
+                        callback_data=f"chat_complete:{request.id}",
+                    ),
                 )
-            elif request.status == 'in_progress':
-                builder.row(
-                    InlineKeyboardButton(text="✅ Завершить", callback_data=f"chat_complete:{request.id}"),
-                )
-            
-            # ИСПРАВЛЕННЫЕ КНОПКИ - используем manager_ префикс
+
+            # Кнопка комментария доступна всегда
             builder.row(
-                InlineKeyboardButton(text="📞 Позвонить", callback_data=f"manager_call:{request.id}"),
-                InlineKeyboardButton(text="💬 Комментарий", callback_data=f"manager_comment:{request.id}")
+                InlineKeyboardButton(
+                    text="💬 Оставить комментарий",
+                    callback_data=f"manager_comment:{request.id}",
+                )
             )
+
+            # Назад к списку
             builder.row(
-                InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="manager_all_requests")
+                InlineKeyboardButton(
+                    text="⬅️ Назад к списку",
+                    callback_data="manager_back",
+                )
             )
-            
-            # Редактируем текущее сообщение
+
             await callback.message.edit_text(
                 detail_text,
                 parse_mode="HTML",
-                reply_markup=builder.as_markup()
+                reply_markup=builder.as_markup(),
             )
-            
             await callback.answer()
-            
+
         except Exception as e:
-            logging.error(f"❌ Ошибка при загрузке деталей заявки: {e}")
-            await callback.answer("❌ Ошибка при загрузке заявки")
+            logging.error(f"❌ Ошибка при загрузке детали заявки #{request_id}: {e}")
+            await callback.answer("❌ Ошибка при загрузке заявки", show_alert=True)
+
 
 # Обработчик кнопки "⬅️ Назад" в панели менеджера
 @router.callback_query(F.data == "manager_main_menu")
@@ -505,11 +526,10 @@ async def manager_add_comment(callback: CallbackQuery, state: FSMContext):
         await state.update_data(request_id=request_id)
         
         await callback.message.answer(
-            f"💬 Введите комментарий для заявки #{request_id}:",
-            reply_markup=InlineKeyboardBuilder().row(
-                InlineKeyboardButton(text="❌ Отмена", callback_data=f"manager_view_request:{request_id}")
-            ).as_markup()
+            f"💬 Для заявки #{request_id}:\n"
+            f"✏️ Ответьте на сообщение с этой заявкой (Reply) и в ответе укажите цену, сроки и условия."
         )
+        await state.set_state(ManagerStates.waiting_manager_comment)
         await callback.answer()
     except Exception as e:
         logging.error(f"❌ Ошибка добавления комментария: {e}")
@@ -518,98 +538,101 @@ async def manager_add_comment(callback: CallbackQuery, state: FSMContext):
 # Обработчик текста комментария
 @router.message(ManagerStates.waiting_manager_comment, F.text)
 async def process_manager_comment(message: Message, state: FSMContext):
-    """Обработка комментария менеджера (как предложение условий для клиента)"""
+    """Менеджер вводит условия (цена/сроки) для клиента по заявке"""
     try:
         user_data = await state.get_data()
-        request_id = user_data["request_id"]
+        request_id = user_data.get("request_id")
         comment_text = message.text.strip()
 
+        if not request_id:
+            await message.answer(
+                "❌ Не удалось определить заявку. "
+                "Откройте её заново через панель менеджера."
+            )
+            await state.clear()
+            return
+
         if not comment_text:
-            await message.answer("❌ Комментарий не может быть пустым. Попробуйте еще раз:")
+            await message.answer("❌ Комментарий не может быть пустым. Попробуйте ещё раз:")
             return
 
         logging.info(f"🔧 Сохранение комментария для заявки #{request_id}: {comment_text}")
 
         async with AsyncSessionLocal() as session:
             try:
-                # Получаем заявку и пользователя
-                request_result = await session.execute(
+                result = await session.execute(
                     select(Request, User)
                     .join(User, Request.user_id == User.id)
                     .where(Request.id == request_id)
                 )
-                row = request_result.first()
-
+                row = result.first()
                 if not row:
                     await message.answer("❌ Заявка не найдена")
                     await state.clear()
                     return
 
                 request, user = row
-
-                # Сохраняем комментарий менеджера
                 request.manager_comment = comment_text
                 await session.commit()
-
                 logging.info(f"✅ Комментарий сохранен для заявки #{request_id}")
-
-                # Ответ менеджеру
-                await message.answer(
-                    f"✅ Комментарий добавлен к заявке #{request_id}",
-                    reply_markup=InlineKeyboardBuilder()
-                    .row(
-                        InlineKeyboardButton(
-                            text="⬅️ Назад к заявке",
-                            callback_data=f"manager_view_request:{request_id}",
-                        )
-                    )
-                    .as_markup(),
-                )
-
-                # Отправляем клиенту предложение с кнопками
-                try:
-                    from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardButton
-
-                    kb = InlineKeyboardBuilder()
-                    kb.row(
-                        InlineKeyboardButton(
-                            text="✅ Подтвердить условия",
-                            callback_data=f"client_accept_offer:{request.id}",
-                        ),
-                        InlineKeyboardButton(
-                            text="❌ Отказаться",
-                            callback_data=f"client_reject_offer:{request.id}",
-                        ),
-                    )
-
-                    offer_text = (
-                        f"💬 <b>Комментарий от менеджера по вашей заявке #{request.id}</b>\n\n"
-                        f"{comment_text}\n\n"
-                        "Подтвердите, если вас устраивают условия."
-                    )
-
-                    await message.bot.send_message(
-                        chat_id=user.telegram_id,
-                        text=offer_text,
-                        parse_mode="HTML",
-                        reply_markup=kb.as_markup(),
-                    )
-                except Exception as send_err:
-                    logging.error(
-                        f"❌ Не удалось отправить комментарий клиенту по заявке #{request_id}: {send_err}"
-                    )
-
             except Exception as db_err:
                 await session.rollback()
-                logging.error(f"❌ Ошибка сохранения комментария в БД: {db_err}")
-                await message.answer("❌ Ошибка при сохранении комментария")
+                logging.error(f"❌ Ошибка при сохранении комментария в БД: {db_err}")
+                await message.answer("❌ Ошибка при сохранении комментария. Попробуйте позже.")
+                await state.clear()
+                return
+
+        # Ответ менеджеру
+        kb_back = InlineKeyboardBuilder()
+        kb_back.row(
+            InlineKeyboardButton(
+                text="⬅️ Назад к заявке",
+                callback_data=f"manager_view_request:{request_id}",
+            )
+        )
+
+        await message.answer(
+            f"✅ Условия отправлены клиенту по заявке #{request_id}",
+            reply_markup=kb_back.as_markup(),
+        )
+
+        # Сообщение клиенту с выбором
+        try:
+            offer_kb = InlineKeyboardBuilder()
+            offer_kb.row(
+                InlineKeyboardButton(
+                    text="✅ Принять условия",
+                    callback_data=f"client_accept_offer:{request_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отказаться",
+                    callback_data=f"client_reject_offer:{request_id}",
+                ),
+            )
+
+            offer_text = (
+                f"💬 <b>Предложение по вашей заявке #{request_id}</b>\n\n"
+                f"{comment_text}\n\n"
+                "Если вас устраивают условия, подтвердите ниже."
+            )
+
+            await message.bot.send_message(
+                chat_id=user.telegram_id,
+                text=offer_text,
+                parse_mode="HTML",
+                reply_markup=offer_kb.as_markup(),
+            )
+        except Exception as send_err:
+            logging.error(
+                f"❌ Не удалось отправить условия клиенту по заявке #{request_id}: {send_err}"
+            )
 
         await state.clear()
 
     except Exception as e:
         logging.error(f"❌ Ошибка обработки комментария менеджера: {e}")
-        await message.answer("❌ Ошибка при обработке комментария")
-
+        await message.answer("❌ Ошибка при обработке комментария. Попробуйте позже.")
+        await state.clear()
 
 
 @router.callback_query(F.data.startswith("manager_view_request:"), ManagerStates.waiting_manager_comment)
