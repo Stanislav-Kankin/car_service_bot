@@ -20,7 +20,7 @@ from app.keyboards.main_kb import (
     get_electric_subtypes_kb, get_aggregates_subtypes_kb,
     get_photo_skip_kb, get_request_confirm_kb,
     get_delete_confirm_kb, get_history_kb, get_edit_cancel_kb,
-    get_can_drive_kb, get_location_reply_kb,
+    get_can_drive_kb, get_location_reply_kb, get_role_kb
 )
 from app.config import config
 
@@ -51,6 +51,11 @@ class RequestForm(StatesGroup):
     preferred_date = State()
     confirm = State()
 
+
+class Registration(StatesGroup):
+    role = State()
+    name = State()
+    phone = State()
 
 
 router = Router()
@@ -106,12 +111,16 @@ async def back_to_main(callback: CallbackQuery, state: FSMContext):
 # Обработчик нажатия на кнопку "Зарегистрироваться"
 @router.callback_query(F.data == "start_registration")
 async def start_registration(callback: CallbackQuery, state: FSMContext):
+    """
+    Первый шаг регистрации: выбор роли (клиент / автосервис).
+    """
+    await state.clear()
     await callback.message.edit_text(
-        "📝 Отлично! Давайте начнем регистрацию.\n\n"
-        "Введите ваше полное имя (как в профиле или как удобно к вам обращаться):",
-        reply_markup=None
+        "Кто вы?\n\n"
+        "Выберите один из вариантов ниже:",
+        reply_markup=get_role_kb(),
     )
-    await state.set_state("waiting_for_name")
+    await state.set_state(Registration.role)
     await callback.answer()
 
 
@@ -127,49 +136,129 @@ async def skip_registration(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.callback_query(F.data == "back_to_registration")
+async def back_to_registration(callback: CallbackQuery, state: FSMContext):
+    """
+    Возврат к экрану с предложением зарегистрироваться.
+    """
+    await state.clear()
+    await callback.message.edit_text(
+        "Для начала работы нужно пройти простую регистрацию:",
+        reply_markup=get_registration_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(Registration.role, F.data.in_(["reg_role_client", "reg_role_service"]))
+async def choose_role(callback: CallbackQuery, state: FSMContext):
+    """
+    Пользователь выбирает роль: клиент или автосервис.
+    """
+    if callback.data == "reg_role_client":
+        role = "client"
+        role_text = "клиент"
+    else:
+        role = "service"
+        role_text = "представитель автосервиса"
+
+    await state.update_data(role=role)
+
+    await callback.message.edit_text(
+        f"Отлично, вы указали, что вы — {role_text}.\n\n"
+        "Теперь введите ваше полное имя (как в профиле или как удобно к вам обращаться):",
+        reply_markup=None,
+    )
+    await state.set_state(Registration.name)
+    await callback.answer()
+
+
 # Обработчик имени при регистрации
-@router.message(StateFilter("waiting_for_name"))
+@router.message(Registration.name)
 async def process_name_registration(message: Message, state: FSMContext):
-    name = message.text.strip()
-    
+    name = (message.text or "").strip()
+
     if len(name) < 2:
         await message.answer(
             "❌ Имя слишком короткое. Пожалуйста, введите полное имя:",
-            reply_markup=None
         )
         return
 
-    await state.update_data(user_name=name)
+    await state.update_data(name=name)
 
     await message.answer(
         f"✅ Приятно познакомиться, {name}!\n\n"
-        "Теперь нажмите на кнопку ниже чтобы отправить номер телефона:",
-        reply_markup=get_phone_reply_kb()
+        "Теперь нажмите на кнопку ниже, чтобы отправить номер телефона:",
+        reply_markup=get_phone_reply_kb(),
     )
-    await state.set_state("waiting_for_phone")
+    await state.set_state(Registration.phone)
 
 
-# Обработчик ВСЕХ сообщений в состоянии waiting_for_phone (для отладки)
-@router.message(StateFilter("waiting_for_phone"))
-async def handle_all_in_phone_state(message: Message, state: FSMContext):
-    # Если пользователь зачем-то отправил текст вместо контакта
-    if not message.contact:
-        await message.answer(
-            "📱 Пожалуйста, используйте кнопку для отправки номера телефона:",
-            reply_markup=get_phone_reply_kb()
-        )
-        return
-
-
-# Обработчик контакта при регистрации
-@router.message(StateFilter("waiting_for_phone"))
+@router.message(Registration.phone)
 async def process_phone_registration(message: Message, state: FSMContext):
+    """
+    Обработка телефона (контакта) при регистрации.
+    """
     if not message.contact:
         await message.answer(
             "📱 Пожалуйста, используйте кнопку для отправки номера телефона:",
-            reply_markup=get_phone_reply_kb()
+            reply_markup=get_phone_reply_kb(),
         )
         return
+
+    phone_number = message.contact.phone_number
+    data = await state.get_data()
+    name = data.get("name") or (message.from_user.full_name or "").strip() or "Без имени"
+    role = data.get("role") or "client"
+
+    async with AsyncSessionLocal() as session:
+        try:
+            # Проверяем, нет ли уже пользователя
+            result = await session.execute(
+                select(User).where(User.telegram_id == message.from_user.id)
+            )
+            user = result.scalar_one_or_none()
+
+            if user:
+                # Обновляем данные
+                user.full_name = name
+                user.phone_number = phone_number
+                user.role = role
+                await session.commit()
+                logging.info(f"🔄 Обновлена регистрация пользователя {message.from_user.id} (role={role})")
+            else:
+                # Создаем нового пользователя
+                new_user = User(
+                    telegram_id=message.from_user.id,
+                    full_name=name,
+                    phone_number=phone_number,
+                    role=role,
+                )
+                session.add(new_user)
+                await session.commit()
+                logging.info(f"✅ Зарегистрирован новый пользователь {message.from_user.id} (role={role})")
+
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"❌ Ошибка при сохранении регистрации: {e}")
+            await message.answer(
+                "❌ Произошла ошибка при сохранении данных. Попробуйте позже.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            await state.clear()
+            return
+
+    await state.clear()
+
+    await message.answer(
+        "✅ Регистрация завершена!\n\n"
+        "Теперь вы можете управлять своими автомобилями и создавать заявки на услуги.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+    await message.answer(
+        "🏠 Главное меню:",
+        reply_markup=get_main_kb(),
+    )
 
     phone_number = message.contact.phone_number
     data = await state.get_data()

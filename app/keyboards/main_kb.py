@@ -414,3 +414,27 @@ def get_location_reply_kb():
         resize_keyboard=True,
         one_time_keyboard=True,
     )
+
+
+def get_role_kb():
+    """
+    Выбор роли при регистрации: клиент или автосервис.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="🚗 Я клиент",
+            callback_data="reg_role_client",
+        ),
+        InlineKeyboardButton(
+            text="🏭 Я автосервис",
+            callback_data="reg_role_service",
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data="back_to_registration",
+        )
+    )
+    return builder.as_markup()

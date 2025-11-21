@@ -16,6 +16,8 @@ class User(Base):
     registered_at = Column(DateTime(timezone=True), server_default=func.now())
     # Баллы лояльности
     points = Column(Integer, nullable=False, default=0)
+    # Роль пользователя: client / service
+    role = Column(String(20), nullable=False, default="client")
 
 
 class Car(Base):

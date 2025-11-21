@@ -3,11 +3,7 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 
 from app.config import config
-from app.services.chat_service import (
-    update_chat_keyboard,
-    reopen_manager_actions_after_user_accept,
-)
-from app.services.comment_service import handle_manager_comment_reply
+
 
 router = Router()
 
@@ -47,25 +43,25 @@ async def manager_view_request(callback: CallbackQuery):
     await callback.answer()
 
 
-# ───────────────────────────────────────────────
-# 📌 MANAGER: КОММЕНТАРИЙ (в группе через reply)
-# ───────────────────────────────────────────────
-@router.message()
-async def manager_reply_handler(message: Message):
-    """
-    Только для reply в группе — передаём в comment_service.
-    """
-    if message.chat.id != config.MANAGER_CHAT_ID:
-        return
+# # ───────────────────────────────────────────────
+# # 📌 MANAGER: КОММЕНТАРИЙ (в группе через reply)
+# # ───────────────────────────────────────────────
+# @router.message()
+# async def manager_reply_handler(message: Message):
+#     """
+#     Только для reply в группе — передаём в comment_service.
+#     """
+#     if message.chat.id != config.MANAGER_CHAT_ID:
+#         return
 
-    if not is_manager(message.from_user.id):
-        return
+#     if not is_manager(message.from_user.id):
+#         return
 
-    if not message.reply_to_message:
-        return
+#     if not message.reply_to_message:
+#         return
 
-    # Обрабатываем как менеджерский комментарий / предложение
-    await handle_manager_comment_reply(message)
+#     # Обрабатываем как менеджерский комментарий / предложение
+#     await handle_manager_comment_reply(message)
 
 
 # ───────────────────────────────────────────────
