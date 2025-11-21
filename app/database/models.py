@@ -3,7 +3,7 @@ from sqlalchemy import (
     BigInteger, Text, DateTime, ForeignKey
 )
 from sqlalchemy.sql import func
-from app.database.base import Base  # ← Импортируем из base.py
+from app.database.base import Base
 
 
 class User(Base):
@@ -14,6 +14,8 @@ class User(Base):
     full_name = Column(String(200), nullable=False)
     phone_number = Column(String(20))
     registered_at = Column(DateTime(timezone=True), server_default=func.now())
+    # ✅ Баллы лояльности пользователя
+    points = Column(Integer, nullable=False, default=0)
 
 
 class Car(Base):

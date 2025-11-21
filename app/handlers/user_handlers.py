@@ -9,6 +9,7 @@ from datetime import datetime
 import logging
 
 from app.services.notification_service import notify_manager_about_new_request
+from app.services.bonus_service import add_bonus, get_user_balance
 from app.database.models import User, Car, Request
 from app.database.db import AsyncSessionLocal
 from app.keyboards.main_kb import (
@@ -192,6 +193,12 @@ async def process_phone_registration(message: Message, state: FSMContext):
                 session.add(new_user)
                 await session.commit()
                 logging.info(f"✅ Зарегистрирован новый пользователь {message.from_user.id}")
+
+                # ✅ Начисляем приветственный бонус (только при первой регистрации)
+                try:
+                    await add_bonus(message.from_user.id, "register", description="Регистрация в боте")
+                except Exception as bonus_err:
+                    logging.error(f"❌ Ошибка начисления бонуса за регистрацию: {bonus_err}")
         except Exception as e:
             await session.rollback()
             logging.error(f"❌ Ошибка при сохранении регистрации: {e}")
@@ -494,7 +501,6 @@ async def edit_car(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# Обработчики выбора поля для редактирования
 @router.callback_query(F.data == "edit_car_brand")
 async def edit_car_brand(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
@@ -535,7 +541,6 @@ async def edit_car_license(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# Обработчик отмены редактирования
 @router.callback_query(F.data == "cancel_edit")
 async def cancel_edit(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -558,7 +563,6 @@ async def cancel_edit(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# Обработчики ввода новых значений при редактировании
 @router.message(CarForm.edit_brand)
 async def process_edit_brand(message: Message, state: FSMContext):
     new_brand = message.text.strip()
@@ -795,7 +799,6 @@ async def process_edit_license_plate(message: Message, state: FSMContext):
     await select_car(fake_callback, state)
 
 
-# Обработчик удаления авто
 @router.callback_query(F.data.startswith("delete_car:"))
 async def delete_car(callback: CallbackQuery, state: FSMContext):
     car_id = int(callback.data.split(":")[1])
@@ -809,7 +812,6 @@ async def delete_car(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# Подтверждение удаления авто
 @router.callback_query(F.data == "confirm_delete_car")
 async def confirm_delete_car(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -849,7 +851,6 @@ async def confirm_delete_car(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# Отмена удаления авто
 @router.callback_query(F.data == "cancel_delete_car")
 async def cancel_delete_car(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -872,7 +873,6 @@ async def cancel_delete_car(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# Обработчик "Создать заявку" (из главного меню)
 @router.callback_query(F.data == "create_request")
 async def create_request(callback: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -957,8 +957,6 @@ async def create_request_for_car(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-
-# Отмена создания заявки
 @router.callback_query(F.data == "cancel_request")
 async def cancel_request(callback: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -995,14 +993,8 @@ async def select_car_for_request(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(RequestForm.service_type)
 async def process_service_type(callback: CallbackQuery, state: FSMContext):
-    """
-    Обработка выбора основного вида работ (группа услуг).
-    На этом шаге либо сразу фиксируем тип услуги, либо
-    уходим на выбор подтипа (выездной/стационарный, агрегаты).
-    """
     service_data = callback.data
 
-    # Возврат к списку групп услуг из подтипов
     if service_data == "service_back_to_groups":
         await callback.message.edit_text(
             "🛠️ Выберите вид работ:",
@@ -1012,7 +1004,6 @@ async def process_service_type(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    # Группы, которые НЕ требуют дополнительного выбора подтипа
     direct_groups = {
         "service_group_wash": "Автомойки",
         "service_group_mechanic": "Слесарные работы",
@@ -1020,7 +1011,6 @@ async def process_service_type(callback: CallbackQuery, state: FSMContext):
         "service_group_maint": "Техобслуживание",
     }
 
-    # Группы, которые ведут на выбор подтипа
     if service_data == "service_group_tire":
         await callback.message.edit_text(
             "🛞 Шиномонтаж\n\n"
@@ -1075,22 +1065,15 @@ async def process_service_type(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(RequestForm.service_subtype)
 async def process_service_subtype(callback: CallbackQuery, state: FSMContext):
-    """
-    Обработка выбора подтипа услуги (выездной/стационарный, конкретный агрегат и т.п.).
-    В БД сохраняем уже человекочитаемое название в поле service_type.
-    """
     service_data = callback.data
 
     subtype_map = {
-        # Шиномонтаж
         "service_tire_stationary": "Шиномонтаж (на СТО)",
         "service_tire_mobile": "Шиномонтаж / Выездной шиномонтаж",
 
-        # Автоэлектрик
         "service_electric_stationary": "Автоэлектрик (на СТО)",
         "service_electric_mobile": "Автоэлектрик / Выездной мастер",
 
-        # Ремонт агрегатов
         "service_agg_turbo": "Ремонт агрегатов / Турбина",
         "service_agg_starter": "Ремонт агрегатов / Стартер",
         "service_agg_generator": "Ремонт агрегатов / Генератор",
@@ -1119,15 +1102,14 @@ async def process_service_subtype(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# Обработчик ввода описания
 @router.message(RequestForm.description)
 async def process_description(message: Message, state: FSMContext):
-    description = message.text.strip()
+    description = (message.text or "").strip()
     
-    if len(description) < 10:
+    if len(description) < 5:
         await message.answer(
             "❌ Описание слишком короткое. Пожалуйста, опишите проблему подробнее "
-            "(минимум 10 символов):",
+            "(минимум 5 символов):",
             reply_markup=get_car_cancel_kb()
         )
         return
@@ -1135,46 +1117,57 @@ async def process_description(message: Message, state: FSMContext):
     await state.update_data(description=description)
     
     await message.answer(
-        "📷 Прикрепите фото проблемы (если есть) или нажмите 'Пропустить':",
+        "📷 Прикрепите фото проблемы (если есть) или нажмите «Пропустить».\n\n"
+        "Важно: бот ожидает <b>одно</b> фото. После его отправки вы перейдёте к выбору времени.",
+        parse_mode="HTML",
         reply_markup=get_photo_skip_kb()
     )
     await state.set_state(RequestForm.photo)
 
 
-# Обработчик фото
+
 @router.callback_query(RequestForm.photo, F.data == "attach_photo")
 async def attach_photo(callback: CallbackQuery, state: FSMContext):
+    """
+    Пользователь выбрал отправку фото — просим одно фото.
+    """
     await callback.message.edit_text(
-        "📷 Отправьте одно или несколько фото.\n\n"
-        "Когда закончите, нажмите 'Пропустить'.",
-        reply_markup=get_photo_skip_kb()
+        "📷 Пожалуйста, отправьте <b>одно</b> фото, иллюстрирующее проблему.\n\n"
+        "После получения фото я спрошу, когда вам удобно выполнить работу.",
+        parse_mode="HTML",
+        reply_markup=None  # Без лишних кнопок, чтобы не путать пользователя
     )
+    # Состояние остаётся RequestForm.photo — теперь мы ждём сообщение с photo
     await callback.answer()
 
 
-# Обработка входящих фото
 @router.message(RequestForm.photo, F.photo)
 async def process_photo(message: Message, state: FSMContext):
-    data = await state.get_data()
-    photos = data.get("photos", [])
+    """
+    Принимаем одно фото, сохраняем его в состоянии и переходим к выбору времени.
+    """
+    file_id = message.photo[-1].file_id  # берём самое большое (последнее) превью
     
-    file_id = message.photo[-1].file_id
-    photos.append(file_id)
-    
-    await state.update_data(photos=photos)
+    await state.update_data(photo=file_id)
     
     await message.answer(
-        f"✅ Фото добавлено ({len(photos)} шт.).\n"
-        "Можете отправить ещё или нажмите 'Пропустить', чтобы продолжить.",
-        reply_markup=get_photo_skip_kb()
+        "✅ Фото получено.\n\n"
+        "⏰ Теперь укажите, когда вам удобно выполнить работу.\n"
+        "Напишите удобное время в свободной форме, например:\n"
+        "• «Сегодня после 18:00»\n"
+        "• «Завтра утром»\n"
+        "• «В выходные, любой день»\n"
+        "• или конкретную дату и время.",
+        reply_markup=get_car_cancel_kb(),
     )
+    await state.set_state(RequestForm.preferred_date)
 
 
-# Пропуск прикрепления фото
 @router.callback_query(RequestForm.photo, F.data == "skip_photo")
 async def skip_photo(callback: CallbackQuery, state: FSMContext):
     """
-    После этапа с фото спрашиваем, когда удобно клиенту (дата/время).
+    Пользователь решил не прикреплять фото.
+    Переходим к сбору информации о времени.
     """
     await callback.message.edit_text(
         "⏰ Когда вам удобно выполнить работу?\n\n"
@@ -1191,9 +1184,6 @@ async def skip_photo(callback: CallbackQuery, state: FSMContext):
 
 @router.message(RequestForm.preferred_date)
 async def process_preferred_date(message: Message, state: FSMContext):
-    """
-    Сохраняем пожелания по времени и показываем итоговую сводку заявки.
-    """
     preferred = (message.text or "").strip()
     if len(preferred) < 3:
         await message.answer(
@@ -1207,12 +1197,12 @@ async def process_preferred_date(message: Message, state: FSMContext):
 
     service_type = data.get("service_type", "Не указано")
     description = data.get("description", "Не указано")
-    photos = data.get("photos", [])
-    photos_text = f"{len(photos)} шт." if photos else "нет"
+    photo_id = data.get("photo")
+    photos_text = "есть" if photo_id else "нет"
 
     await message.answer(
         "📄 Заявка на услугу\n\n"
-        f"🚗 Авто: будет показано менеджеру по ID\n"
+        f"🚗 Авто: будет показано менеджеру по данным из гаража\n"
         f"🔧 Услуга: {service_type}\n"
         f"📝 Описание: {description}\n"
         f"📷 Фото: {photos_text}\n"
@@ -1223,7 +1213,6 @@ async def process_preferred_date(message: Message, state: FSMContext):
     await state.set_state(RequestForm.confirm)
 
 
-# Подтверждение заявки
 @router.callback_query(RequestForm.confirm, F.data == "confirm_request")
 async def confirm_request(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1231,12 +1220,11 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
     car_id = data.get("car_id")
     service_type = data.get("service_type")
     description = data.get("description")
-    photos = data.get("photos", [])
+    photo_id = data.get("photo")  # <-- одно фото
     preferred_date = data.get("preferred_date")
     
     async with AsyncSessionLocal() as session:
         try:
-            # Получаем пользователя и автомобиль
             user_result = await session.execute(
                 select(User).where(User.telegram_id == callback.from_user.id)
             )
@@ -1265,20 +1253,29 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
                 await callback.answer()
                 return
             
-            # Создаем заявку
             new_request = Request(
                 user_id=user.id,
                 car_id=car.id,
                 service_type=service_type,
                 description=description,
-                photo_file_id=",".join(photos) if photos else None,
-                status="new"
+                photo_file_id=photo_id,  # <-- тут просто строка или None
+                status="new",
+                preferred_date=preferred_date,
             )
 
             session.add(new_request)
             await session.commit()
+
+            # ✅ Бонус за создание заявки
+            try:
+                await add_bonus(
+                    callback.from_user.id,
+                    "new_request",
+                    description=f"Создание заявки #{new_request.id}",
+                )
+            except Exception as bonus_err:
+                logging.error(f"❌ Ошибка начисления бонуса за создание заявки: {bonus_err}")
             
-            # Уведомляем менеджера
             try:
                 await notify_manager_about_new_request(callback.bot, new_request.id)
             except Exception as notify_error:
@@ -1300,7 +1297,6 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# Изменение заявки перед подтверждением (пока просто отмена и пересоздание)
 @router.callback_query(RequestForm.confirm, F.data == "edit_request")
 async def edit_request(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
@@ -1312,7 +1308,6 @@ async def edit_request(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# Просмотр заявок пользователя
 @router.callback_query(F.data == "my_requests")
 async def my_requests(callback: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -1324,25 +1319,21 @@ async def my_requests(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# История активных заявок
 @router.callback_query(F.data == "history_active")
 async def history_active(callback: CallbackQuery, state: FSMContext):
     await show_requests_list(callback, filter_status="active")
 
 
-# История архивных заявок
 @router.callback_query(F.data == "history_archived")
 async def history_archived(callback: CallbackQuery, state: FSMContext):
     await show_requests_list(callback, filter_status="archived")
 
 
-# Функция показа списка заявок
 async def show_requests_list(callback: CallbackQuery, filter_status: str = None):
     async with AsyncSessionLocal() as session:
         try:
             user_id = callback.from_user.id
             
-            # Получаем пользователя
             user_result = await session.execute(select(User).where(User.telegram_id == user_id))
             user = user_result.scalar_one_or_none()
             
@@ -1350,7 +1341,6 @@ async def show_requests_list(callback: CallbackQuery, filter_status: str = None)
                 await callback.message.edit_text("❌ Пользователь не найден. Начните с /start")
                 return
             
-            # Получаем заявки
             query = select(Request).where(Request.user_id == user.id)
             
             if filter_status == "active":
@@ -1375,7 +1365,6 @@ async def show_requests_list(callback: CallbackQuery, filter_status: str = None)
                 )
                 return
             
-            # Формируем список
             lines = []
             for req in requests:
                 status_emoji = {
@@ -1414,7 +1403,6 @@ async def client_accept_offer(callback: CallbackQuery):
         request_id = int(callback.data.split(":")[1])
 
         async with AsyncSessionLocal() as session:
-            # Ищем пользователя
             user_result = await session.execute(
                 select(User).where(User.telegram_id == callback.from_user.id)
             )
@@ -1423,7 +1411,6 @@ async def client_accept_offer(callback: CallbackQuery):
                 await callback.answer("❌ Пользователь не найден. Нажмите /start", show_alert=True)
                 return
 
-            # Ищем заявку этого пользователя
             req_result = await session.execute(
                 select(Request).where(
                     Request.id == request_id,
@@ -1435,17 +1422,24 @@ async def client_accept_offer(callback: CallbackQuery):
                 await callback.answer("❌ Заявка не найдена", show_alert=True)
                 return
 
-            # Обновляем статус
             request.status = "accepted"
             await session.commit()
 
-        # Меняем текст у клиента
+        # ✅ Бонус за подтверждение условий
+        try:
+            await add_bonus(
+                callback.from_user.id,
+                "accept_offer",
+                description=f"Подтверждение условий по заявке #{request_id}",
+            )
+        except Exception as bonus_err:
+            logging.error(f"❌ Ошибка начисления бонуса за подтверждение условий: {bonus_err}")
+
         await callback.message.edit_text(
             f"✅ Вы подтвердили условия по заявке #{request_id}.\n"
             f"Менеджер свяжется с вами для записи и выполнения работ."
         )
 
-        # Уведомляем менеджерскую группу
         try:
             await callback.bot.send_message(
                 chat_id=config.MANAGER_CHAT_ID,
@@ -1458,7 +1452,6 @@ async def client_accept_offer(callback: CallbackQuery):
         except Exception as e:
             logging.error(f"❌ Не удалось уведомить менеджеров о принятии условий: {e}")
 
-        # Обновляем клавиатуру в чате заявки (теперь появятся кнопки статусов)
         try:
             from app.handlers.chat_handlers import update_chat_keyboard
             await update_chat_keyboard(callback.bot, request_id)
@@ -1479,7 +1472,6 @@ async def client_reject_offer(callback: CallbackQuery):
         request_id = int(callback.data.split(":")[1])
 
         async with AsyncSessionLocal() as session:
-            # Ищем пользователя
             user_result = await session.execute(
                 select(User).where(User.telegram_id == callback.from_user.id)
             )
@@ -1488,7 +1480,6 @@ async def client_reject_offer(callback: CallbackQuery):
                 await callback.answer("❌ Пользователь не найден. Нажмите /start", show_alert=True)
                 return
 
-            # Ищем заявку этого пользователя
             req_result = await session.execute(
                 select(Request).where(
                     Request.id == request_id,
@@ -1500,7 +1491,6 @@ async def client_reject_offer(callback: CallbackQuery):
                 await callback.answer("❌ Заявка не найдена", show_alert=True)
                 return
 
-            # Помечаем как отклонённую
             request.status = "rejected"
             await session.commit()
 
@@ -1509,7 +1499,6 @@ async def client_reject_offer(callback: CallbackQuery):
             f"Если хотите, вы можете создать новую заявку."
         )
 
-        # Уведомляем менеджеров
         try:
             await callback.bot.send_message(
                 chat_id=config.MANAGER_CHAT_ID,
@@ -1522,7 +1511,6 @@ async def client_reject_offer(callback: CallbackQuery):
         except Exception as e:
             logging.error(f"❌ Не удалось уведомить менеджеров об отказе: {e}")
 
-        # Чистим кнопки в чате заявки
         try:
             from app.handlers.chat_handlers import update_chat_keyboard
             await update_chat_keyboard(callback.bot, request_id)
@@ -1534,3 +1522,43 @@ async def client_reject_offer(callback: CallbackQuery):
     except Exception as e:
         logging.error(f"❌ Ошибка при отказе от условий клиентом: {e}")
         await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
+
+
+# ✅ Новый хэндлер: экран "Мои бонусы"
+@router.callback_query(F.data == "my_points")
+async def my_points(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    balance, history = await get_user_balance(callback.from_user.id)
+
+    if balance is None:
+        await callback.message.edit_text(
+            "❌ Пользователь не найден. Нажмите /start для регистрации.",
+            reply_markup=get_main_kb(),
+        )
+        await callback.answer()
+        return
+
+    text_lines = [
+        "🎁 <b>Ваши бонусы</b>\n",
+        f"💰 Баланс: <b>{balance}</b> баллов\n",
+    ]
+
+    if history:
+        text_lines.append("\n🕒 Последние начисления:\n")
+        for tx in history:
+            created_at = tx.created_at.strftime("%d.%m.%Y %H:%M") if tx.created_at else ""
+            # action пока строкой, позже можем маппить в человекочитаемый текст
+            text_lines.append(f"• {created_at} — +{tx.amount} за <i>{tx.action}</i>\n")
+    else:
+        text_lines.append("\nПока начислений нет. Совершайте действия в боте, чтобы получать баллы.\n")
+
+    text_lines.append(
+        "\nВ дальнейшем баллы можно будет использовать для скидок, акций и других механик монетизации."
+    )
+
+    await callback.message.edit_text(
+        "".join(text_lines),
+        parse_mode="HTML",
+        reply_markup=get_main_kb(),
+    )
+    await callback.answer()

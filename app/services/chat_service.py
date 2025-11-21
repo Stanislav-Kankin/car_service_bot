@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 from typing import Optional
 
 from aiogram import Bot
@@ -13,10 +12,15 @@ from app.database.models import Request, User, Car
 
 
 def _format_status(status: Optional[str]) -> str:
+    """
+    Человекочитаемый статус заявки для отображения в карточке.
+    """
     status = status or "new"
     mapping = {
         "new": "🆕 Новая",
-        "accepted": "✅ Принята клиентом",
+        "offer_sent": "📩 Условия отправлены клиенту",
+        "accepted_by_client": "✅ Принята клиентом (ожидает подтверждения сервиса)",
+        "accepted": "✅ Принята сервисом",
         "in_progress": "⏳ В работе",
         "completed": "✅ Завершена",
         "rejected": "❌ Отклонена",
@@ -29,43 +33,78 @@ def _build_chat_keyboard(request: Request) -> InlineKeyboardMarkup:
     """
     Формирует inline-клавиатуру под сообщение в группе менеджеров
     в зависимости от текущего статуса заявки.
+
+    Логика:
+
+    - new:
+        • 💬 Ответить клиенту (цена/сроки)
+        • ❌ Отклонить заявку (с комментарием)
+    - offer_sent:
+        • только 🔄 Обновить (ждём клиента)
+    - accepted_by_client:
+        • ✅ Принять
+        • 🔧 Взять в работу
+        • ❌ Отменить
+    - accepted:
+        • 🔧 Взять в работу
+        • ❌ Отменить
+    - in_progress:
+        • ✅ Завершить
+        • ❌ Отменить
+    - completed / rejected:
+        • 🔄 Обновить (по факту уже финальные)
     """
     kb = InlineKeyboardBuilder()
     rid = request.id
-
     status = request.status or "new"
 
     if status == "new":
-        # Только комментарий, отправка условий клиенту и обновление
         kb.button(
-            text="💬 Комментарий",
-            callback_data=f"manager_comment:{rid}",
+            text="💬 Ответить клиенту",
+            callback_data=f"mgr_offer:{rid}",
         )
         kb.button(
-            text="📩 Отправить условия клиенту",
-            callback_data=f"manager_send_offer:{rid}",
+            text="❌ Отклонить заявку",
+            callback_data=f"mgr_reject:{rid}",
         )
         kb.button(
             text="🔄 Обновить",
-            callback_data=f"manager_view_request:{rid}",
+            callback_data=f"chat_refresh:{rid}",
+        )
+        kb.adjust(1, 1, 1)
+
+    elif status == "offer_sent":
+        kb.button(
+            text="🔄 Обновить",
+            callback_data=f"chat_refresh:{rid}",
+        )
+        kb.adjust(1)
+
+    elif status == "accepted_by_client":
+        kb.button(
+            text="✅ Принять",
+            callback_data=f"chat_confirm:{rid}",
+        )
+        kb.button(
+            text="🔧 Взять в работу",
+            callback_data=f"chat_start:{rid}",
+        )
+        kb.button(
+            text="❌ Отменить",
+            callback_data=f"chat_cancel:{rid}",
         )
         kb.adjust(1, 1, 1)
 
     elif status == "accepted":
-        # Клиент подтвердил условия – менеджер может взять в работу
         kb.button(
-            text="⏳ В работу",
-            callback_data=f"chat_in_progress:{rid}",
+            text="🔧 Взять в работу",
+            callback_data=f"chat_start:{rid}",
         )
         kb.button(
-            text="💬 Комментарий",
-            callback_data=f"manager_comment:{rid}",
+            text="❌ Отменить",
+            callback_data=f"chat_cancel:{rid}",
         )
-        kb.button(
-            text="🔄 Обновить",
-            callback_data=f"manager_view_request:{rid}",
-        )
-        kb.adjust(1, 1, 1)
+        kb.adjust(1, 1)
 
     elif status == "in_progress":
         kb.button(
@@ -73,20 +112,16 @@ def _build_chat_keyboard(request: Request) -> InlineKeyboardMarkup:
             callback_data=f"chat_complete:{rid}",
         )
         kb.button(
-            text="💬 Комментарий",
-            callback_data=f"manager_comment:{rid}",
+            text="❌ Отменить",
+            callback_data=f"chat_cancel:{rid}",
         )
-        kb.button(
-            text="🔄 Обновить",
-            callback_data=f"manager_view_request:{rid}",
-        )
-        kb.adjust(1, 1, 1)
+        kb.adjust(1, 1)
 
     else:
-        # Для отклонённых/завершённых – только обновление
+        # completed / rejected / прочие
         kb.button(
             text="🔄 Обновить",
-            callback_data=f"manager_view_request:{rid}",
+            callback_data=f"chat_refresh:{rid}",
         )
         kb.adjust(1)
 
@@ -105,7 +140,11 @@ def _format_request_text(request: Request, user: User, car: Optional[Car]) -> st
             f"   • Госномер: {car.license_plate}"
         )
 
-    created_at = request.created_at.strftime("%d.%m.%Y %H:%M") if request.created_at else "неизвестно"
+    created_at = (
+        request.created_at.strftime("%d.%m.%Y %H:%M")
+        if request.created_at
+        else "неизвестно"
+    )
 
     text = (
         f"📋 Заявка #{request.id}\n\n"
@@ -117,8 +156,8 @@ def _format_request_text(request: Request, user: User, car: Optional[Car]) -> st
         f"📝 Описание:\n{request.description}\n\n"
         f"📊 Статус: {_format_status(request.status)}\n"
         f"⏰ Создана: {created_at}\n\n"
-        "ℹ️ Чтобы оставить комментарий, ответьте на это сообщение (Reply)\n"
-        "или используйте кнопку ниже."
+        "ℹ️ Чтобы ответить по заявке, нажмите нужную кнопку ниже.\n"
+        "Если нужно просто оставить комментарий, ответьте на это сообщение (Reply)."
     )
 
     if request.manager_comment:
@@ -128,7 +167,11 @@ def _format_request_text(request: Request, user: User, car: Optional[Car]) -> st
 
 
 async def create_request_chat(bot: Bot, request_id: int) -> None:
-    """Создать/отправить сообщение о заявке в группу менеджеров."""
+    """
+    Создать/отправить сообщение о заявке в группу менеджеров.
+
+    Используется при создании новой заявки клиентом.
+    """
     async with AsyncSessionLocal() as session:
         try:
             result = await session.execute(
@@ -152,7 +195,9 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
             try:
                 chat_id = int(config.MANAGER_CHAT_ID)
             except ValueError:
-                logging.error(f"❌ Некорректный MANAGER_CHAT_ID: {config.MANAGER_CHAT_ID}")
+                logging.error(
+                    f"❌ Некорректный MANAGER_CHAT_ID: {config.MANAGER_CHAT_ID}"
+                )
                 return
 
             text = _format_request_text(request, user, car)
@@ -160,13 +205,13 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
 
             message = None
 
-            # Берём первое фото, если в строке несколько file_id через запятую
+            # Берём первое фото, если есть
             file_id = None
             if request.photo_file_id:
+                # На будущее оставляю split, вдруг позже решим хранить несколько
                 file_id = request.photo_file_id.split(",")[0].strip() or None
 
             if file_id:
-                # Пытаемся отправить как фото, если не получится — просто текст
                 try:
                     message = await bot.send_photo(
                         chat_id=chat_id,
@@ -176,10 +221,11 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
                         parse_mode="HTML",
                     )
                 except Exception as e:
-                    logging.error(f"❌ Ошибка отправки фото в чат менеджеров для заявки #{request_id}: {e}")
+                    logging.error(
+                        f"❌ Ошибка отправки фото в чат менеджеров для заявки #{request_id}: {e}"
+                    )
 
             if message is None:
-                # Без фото / фото не отправилось
                 message = await bot.send_message(
                     chat_id=chat_id,
                     text=text,
@@ -190,7 +236,10 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
             # Сохраняем ID сообщения чата, чтобы потом обновлять клавиатуру
             request.chat_message_id = message.message_id
             await session.commit()
-            logging.info(f"✅ Чат для заявки #{request_id} создан и сообщение отправлено (msg_id={message.message_id})")
+            logging.info(
+                f"✅ Чат для заявки #{request_id} создан и сообщение отправлено "
+                f"(msg_id={message.message_id})"
+            )
 
         except Exception as e:
             await session.rollback()
@@ -198,7 +247,10 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
 
 
 async def update_chat_keyboard(bot: Bot, request_id: int) -> None:
-    """Обновить inline-клавиатуру под сообщением заявки в группе менеджеров."""
+    """
+    Обновить inline-клавиатуру под сообщением заявки в группе менеджеров.
+    Используется после изменения статуса/данных заявки.
+    """
     async with AsyncSessionLocal() as session:
         try:
             result = await session.execute(
@@ -207,7 +259,9 @@ async def update_chat_keyboard(bot: Bot, request_id: int) -> None:
             request = result.scalar_one_or_none()
 
             if not request:
-                logging.error(f"❌ update_chat_keyboard: заявка #{request_id} не найдена")
+                logging.error(
+                    f"❌ update_chat_keyboard: заявка #{request_id} не найдена"
+                )
                 return
 
             if not request.chat_message_id:
@@ -223,7 +277,9 @@ async def update_chat_keyboard(bot: Bot, request_id: int) -> None:
             try:
                 chat_id = int(config.MANAGER_CHAT_ID)
             except ValueError:
-                logging.error(f"❌ Некорректный MANAGER_CHAT_ID: {config.MANAGER_CHAT_ID}")
+                logging.error(
+                    f"❌ Некорректный MANAGER_CHAT_ID: {config.MANAGER_CHAT_ID}"
+                )
                 return
 
             keyboard = _build_chat_keyboard(request)
@@ -234,12 +290,14 @@ async def update_chat_keyboard(bot: Bot, request_id: int) -> None:
                     message_id=request.chat_message_id,
                     reply_markup=keyboard,
                 )
-                logging.info(f"🔧 update_chat_keyboard #{request_id}, status={request.status}")
+                logging.info(
+                    f"🔧 update_chat_keyboard #{request_id}, status={request.status}"
+                )
             except Exception as e:
-                # Игнорируем ситуацию "message is not modified"
                 if "message is not modified" in str(e):
                     logging.info(
-                        f"ℹ️ Клавиатура для заявки #{request_id} уже актуальна, Telegram вернул 'message is not modified'"
+                        f"ℹ️ Клавиатура для заявки #{request_id} уже актуальна, "
+                        f"Telegram вернул 'message is not modified'"
                     )
                 else:
                     logging.error(

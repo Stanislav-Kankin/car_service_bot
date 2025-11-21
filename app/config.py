@@ -50,6 +50,22 @@ class Config:
         print(f"⚠️ Некорректный ADMIN_USER_ID={os.getenv('ADMIN_USER_ID')!r}, использую 281146928")
         ADMIN_USER_ID = 281146928
 
+    # -------------------
+    # Бонусы / монетизация
+    # -------------------
+    # Все значения можно переопределить в .env
+    try:
+        BONUS_REGISTER = int(os.getenv("BONUS_REGISTER", "100"))          # Зарегался
+        BONUS_NEW_REQUEST = int(os.getenv("BONUS_NEW_REQUEST", "50"))     # Оставил заявку
+        BONUS_ACCEPT_OFFER = int(os.getenv("BONUS_ACCEPT_OFFER", "30"))   # Принял условия
+        BONUS_COMPLETE_REQUEST = int(os.getenv("BONUS_COMPLETE_REQUEST", "20"))  # Заявка завершена
+    except ValueError:
+        # Фоллбек, если в .env задали мусор
+        BONUS_REGISTER = 100
+        BONUS_NEW_REQUEST = 50
+        BONUS_ACCEPT_OFFER = 30
+        BONUS_COMPLETE_REQUEST = 20
+
     @classmethod
     def validate(cls):
         if not cls.BOT_TOKEN:

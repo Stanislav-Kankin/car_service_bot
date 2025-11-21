@@ -1,31 +1,35 @@
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Tuple
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select
 
 from app.config import config
 from app.database.db import AsyncSessionLocal
 from app.database.models import Request, User
 from app.services.chat_service import update_chat_keyboard
-
+from app.services.bonus_service import add_bonus
 
 router = Router()
 
+# request_id -> "offer" | "reject"
+PENDING_ACTIONS: Dict[int, str] = {}
 
-def _is_manager(telegram_id: int) -> bool:
-    """Пока считаем менеджером только ADMIN_USER_ID из .env"""
-    try:
-        return int(config.ADMIN_USER_ID) == int(telegram_id)
-    except Exception:
-        return False
+# message_id сервисного сообщения ("Введите условия...", "Введите причину...")
+# -> request_id
+PROMPT_MESSAGES: Dict[int, int] = {}
 
 
-async def _load_request_with_user(session, request_id: int) -> Optional[tuple[Request, User]]:
+
+async def _load_request_with_user(
+    session, request_id: int
+) -> Optional[Tuple[Request, User]]:
     result = await session.execute(
-        select(Request, User).join(User, Request.user_id == User.id).where(Request.id == request_id)
+        select(Request, User)
+        .join(User, Request.user_id == User.id)
+        .where(Request.id == request_id)
     )
     row = result.first()
     if not row:
@@ -33,220 +37,401 @@ async def _load_request_with_user(session, request_id: int) -> Optional[tuple[Re
     return row[0], row[1]
 
 
-@router.callback_query(F.data.startswith("chat_"))
-async def handle_chat_actions(callback: CallbackQuery):
-    """Общий вход для всех callback из сообщения в группе менеджеров (chat_...)."""
-    data = callback.data
-    logging.info(f"🔔 Chat action: {data}")
+def _ensure_manager_chat(callback: CallbackQuery) -> bool:
+    """
+    Проверяем, что коллбек пришёл из чата менеджеров.
+    """
+    if not callback.message or not callback.message.chat:
+        return False
 
-    # Проверяем права
-    if not _is_manager(callback.from_user.id):
-        logging.info(
-            f"[is_manager] NO ACCESS telegram_id={callback.from_user.id}, ADMIN_USER_ID={config.ADMIN_USER_ID}"
-        )
-        await callback.answer("❌ Недостаточно прав для изменения заявки", show_alert=True)
+    if callback.message.chat.id != config.MANAGER_CHAT_ID:
+        return False
+
+    return True
+
+
+# =======================
+# 1. Менеджер: отправка условий / отказ
+# =======================
+
+
+@router.callback_query(F.data.startswith("mgr_offer:"))
+async def manager_offer(callback: CallbackQuery):
+    """
+    Менеджер нажал "Ответить клиенту" в чате менеджеров.
+    Дальше он должен ответить (reply) на сообщение с заявкой
+    текстом с ценой и сроками.
+    """
+    if not _ensure_manager_chat(callback):
+        await callback.answer("Доступно только в чате менеджеров", show_alert=True)
         return
 
-    # data вида 'chat_in_progress:17'
     try:
-        action, rid_str = data.split(":", 1)
-        action = action.replace("chat_", "")
-        request_id = int(rid_str)
-    except Exception:
-        await callback.answer("❌ Неверные данные callback", show_alert=True)
+        request_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные", show_alert=True)
         return
 
-    if action == "in_progress":
-        await set_in_progress(callback, request_id)
-    elif action == "complete":
-        await complete_request(callback, request_id)
-    elif action == "reject":
-        await reject_request(callback, request_id)
-    elif action == "accept":
-        # На всякий случай заглушка — принять должен клиент, не чат
-        await callback.answer(
-            "ℹ️ Подтверждение условий выполняется только со стороны клиента в боте.",
-            show_alert=True,
+    async with AsyncSessionLocal() as session:
+        data = await _load_request_with_user(session, request_id)
+        if not data:
+            await callback.answer("❌ Заявка не найдена", show_alert=True)
+            return
+
+        request, user = data
+
+        if request.status not in ("new", "rejected"):
+            await callback.answer(
+                "Статус заявки не позволяет отправить условия", show_alert=True
+            )
+            return
+
+    # Запоминаем, что для этой заявки ожидаем текст условий
+    PENDING_ACTIONS[request_id] = "offer"
+
+    prompt = await callback.message.reply(
+        "💬 Введите условия для клиента (цена, сроки и т.п.) одним сообщением.\n\n"
+        "‼️ Ответьте <b>reply</b> на ЭТО сообщение или на сообщение с заявкой.",
+        parse_mode="HTML",
+    )
+    # Запомним, что этот prompt относится к заявке request_id
+    PROMPT_MESSAGES[prompt.message_id] = request_id
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("mgr_reject:"))
+async def manager_reject_start(callback: CallbackQuery):
+    """
+    Менеджер нажал "Отклонить заявку" в чате менеджеров.
+    Дальше он должен ответить (reply) на сообщение с заявкой
+    текстом с причиной отказа.
+    """
+    if not _ensure_manager_chat(callback):
+        await callback.answer("Доступно только в чате менеджеров", show_alert=True)
+        return
+
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        data = await _load_request_with_user(session, request_id)
+        if not data:
+            await callback.answer("❌ Заявка не найдена", show_alert=True)
+            return
+
+        request, user = data
+
+        if request.status in ("completed", "rejected"):
+            await callback.answer(
+                "Заявка уже завершена или отклонена", show_alert=True
+            )
+            return
+
+    PENDING_ACTIONS[request_id] = "reject"
+
+    prompt = await callback.message.reply(
+        "❌ Введите причину отказа одним сообщением.\n\n"
+        "‼️ Ответьте <b>reply</b> на ЭТО сообщение или на сообщение с заявкой.",
+        parse_mode="HTML",
+    )
+    PROMPT_MESSAGES[prompt.message_id] = request_id
+
+    await callback.answer()
+
+
+@router.message(F.chat.id == config.MANAGER_CHAT_ID)
+async def manager_reply_in_group(message: Message):
+    """
+    Обрабатываем сообщения менеджеров в чате менеджеров.
+
+    Если это reply на сообщение с заявкой ИЛИ на сервисное сообщение
+    ("Введите условия", "Введите причину") и для этой заявки есть
+    ожидаемое действие (offer / reject) — выполняем его.
+    """
+    if not message.reply_to_message:
+        return  # не reply — нас не интересует
+
+    replied_msg_id = message.reply_to_message.message_id
+
+    async with AsyncSessionLocal() as session:
+        # 1) Пытаемся найти заявку по chat_message_id (карточка заявки)
+        result = await session.execute(
+            select(Request, User)
+            .join(User, Request.user_id == User.id)
+            .where(Request.chat_message_id == replied_msg_id)
         )
-    else:
-        logging.warning(f"⚠️ Неизвестное действие chat_*: {action}")
-        await callback.answer("❌ Неизвестное действие", show_alert=True)
+        row = result.first()
+
+        # 2) Если не нашли — возможно, ответили на "подсказку"
+        if not row:
+            req_id_from_prompt = PROMPT_MESSAGES.get(replied_msg_id)
+            if not req_id_from_prompt:
+                # Ни карточки, ни подсказки — игнорируем
+                return
+
+            result = await session.execute(
+                select(Request, User)
+                .join(User, Request.user_id == User.id)
+                .where(Request.id == req_id_from_prompt)
+            )
+            row = result.first()
+            if not row:
+                return
+
+        request, user = row
+        request_id = request.id
+
+        action = PENDING_ACTIONS.get(request_id)
+        text = (message.text or "").strip()
+
+        if not action:
+            logging.info(
+                f"[chat] Комментарий менеджера без активного действия для заявки #{request_id}: {text!r}"
+            )
+            return
+
+        if not text:
+            await message.reply(
+                "❌ Текст не должен быть пустым. Отправьте сообщение ещё раз."
+            )
+            return
+
+        # Снимаем ожидание действия и очищаем привязку подсказки
+        PENDING_ACTIONS.pop(request_id, None)
+        PROMPT_MESSAGES.pop(replied_msg_id, None)
+
+        if not action:
+            # Нет активного действия — можно считать это обычным комментарием
+            logging.info(
+                f"[chat] Комментарий менеджера без активного действия для заявки #{request_id}: {text!r}"
+            )
+            return
+
+        if not text:
+            await message.reply(
+                "❌ Текст не должен быть пустым. Отправьте сообщение ещё раз."
+            )
+            return
+
+        # Снимаем ожидание действия
+        PENDING_ACTIONS.pop(request_id, None)
+
+        # ----- ОТПРАВКА УСЛОВИЙ КЛИЕНТУ -----
+        if action == "offer":
+            try:
+                request.manager_comment = text
+                request.status = "offer_sent"
+                await session.commit()
+
+                # Уведомляем клиента
+                try:
+                    kb = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="✅ Принять",
+                                    callback_data=f"offer_accept:{request.id}",
+                                ),
+                                InlineKeyboardButton(
+                                    text="❌ Отклонить",
+                                    callback_data=f"offer_reject:{request.id}",
+                                ),
+                            ]
+                        ]
+                    )
+
+                    offer_text = (
+                        f"📋 Ваша заявка #{request.id}\n\n"
+                        f"🛠 Услуга: {request.service_type}\n\n"
+                        f"💬 Условия от сервиса:\n{text}\n\n"
+                        "Вы можете принять или отклонить эти условия:"
+                    )
+
+                    await message.bot.send_message(
+                        chat_id=user.telegram_id,
+                        text=offer_text,
+                        reply_markup=kb,
+                    )
+                except Exception as send_err:
+                    logging.error(
+                        f"❌ Не удалось отправить условия клиенту по заявке #{request.id}: {send_err}"
+                    )
+
+                # Сообщаем в чат менеджеров
+                await message.reply(
+                    f"✅ Условия по заявке #{request.id} отправлены клиенту."
+                )
+
+                # Обновляем клавиатуру в чате
+                await update_chat_keyboard(message.bot, request.id)
+
+            except Exception as e:
+                await session.rollback()
+                logging.error(
+                    f"❌ Ошибка при сохранении условий по заявке #{request.id}: {e}"
+                )
+                await message.reply("❌ Ошибка при сохранении условий. Попробуйте позже.")
+
+        # ----- ОТКЛОНЕНИЕ ЗАЯВКИ -----
+        elif action == "reject":
+            try:
+                request.manager_comment = text
+                request.status = "rejected"
+                request.rejected_at = datetime.now()
+                await session.commit()
+
+                # Уведомляем клиента
+                try:
+                    text_client = (
+                        f"❌ Ваша заявка #{request.id} была отклонена.\n\n"
+                        f"Причина:\n{text}"
+                    )
+                    await message.bot.send_message(
+                        chat_id=user.telegram_id,
+                        text=text_client,
+                    )
+                except Exception as send_err:
+                    logging.error(
+                        f"❌ Не удалось отправить сообщение клиенту об отклонении заявки #{request.id}: {send_err}"
+                    )
+
+                await message.reply(
+                    f"✅ Заявка #{request.id} отклонена, причина отправлена клиенту."
+                )
+                await update_chat_keyboard(message.bot, request.id)
+
+            except Exception as e:
+                await session.rollback()
+                logging.error(
+                    f"❌ Ошибка при отклонении заявки #{request.id}: {e}"
+                )
+                await message.reply("❌ Ошибка при изменении статуса. Попробуйте позже.")
 
 
-async def set_in_progress(callback: CallbackQuery, request_id: int):
-    """Взять заявку в работу (статус in_progress)."""
+# =======================
+# 2. Клиент: принять / отклонить предложение
+# =======================
+
+
+@router.callback_query(F.data.startswith("offer_accept:"))
+async def client_accept_offer(callback: CallbackQuery):
+    """
+    Клиент принимает условия сервиса по заявке.
+    """
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
     async with AsyncSessionLocal() as session:
         try:
-            data = await _load_request_with_user(session, request_id)
-            if not data:
+            result = await session.execute(
+                select(Request, User)
+                .join(User, Request.user_id == User.id)
+                .where(Request.id == request_id)
+            )
+            row = result.first()
+            if not row:
                 await callback.answer("❌ Заявка не найдена", show_alert=True)
                 return
 
-            request, user = data
-            current_status = request.status or "new"
-            logging.info(f"✅ set_in_progress #{request_id}, current_status={current_status}")
+            request, user = row
 
-            # запрещаем для отклоненных/завершенных
-            if current_status in ("rejected", "completed"):
+            if user.telegram_id != callback.from_user.id:
                 await callback.answer(
-                    "❌ Нельзя взять в работу завершённую или отклонённую заявку",
+                    "❌ Эта заявка принадлежит другому пользователю",
                     show_alert=True,
                 )
                 return
 
-            # В работу можно только после того, как клиент подтвердил условия
-            if current_status != "accepted":
+            if request.status != "offer_sent":
                 await callback.answer(
-                    "❌ Заявку можно взять в работу только после подтверждения клиентом",
-                    show_alert=True,
+                    "Статус заявки не позволяет принять условия", show_alert=True
                 )
                 return
 
-            request.status = "in_progress"
-            request.in_progress_at = datetime.now()
+            request.status = "accepted_by_client"
+            request.accepted_at = datetime.now()
             await session.commit()
-            logging.info(f"⏳ Заявка #{request_id} взята в работу в {request.in_progress_at}")
-
-            # Сообщение клиенту о начале работ + кнопка связаться с менеджером
-            try:
-                manager_name = (
-                    callback.from_user.full_name
-                    or callback.from_user.username
-                    or "Менеджер"
-                )
-                manager_mention = (
-                    f" (@{callback.from_user.username})"
-                    if callback.from_user.username
-                    else ""
-                )
-
-                from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-                user_message = (
-                    "🔧 <b>Ваша заявка принята в работу!</b>\n\n"
-                    f"📋 <b>Номер заявки:</b> #{request.id}\n"
-                    f"🛠️ <b>Услуга:</b> {request.service_type}\n\n"
-                    f"👨‍🔧 <b>Ваш менеджер:</b> {manager_name}{manager_mention}\n"
-                    "Можете связаться с ним в Telegram при необходимости."
-                )
-
-                kb = InlineKeyboardBuilder()
-
-                if callback.from_user.username:
-                    kb.button(
-                        text="💬 Связаться с менеджером",
-                        url=f"https://t.me/{callback.from_user.username}",
-                    )
-                else:
-                    kb.button(
-                        text="💬 Связаться с менеджером",
-                        url=f"tg://user?id={callback.from_user.id}",
-                    )
-
-                kb.adjust(1)
-
-                await callback.bot.send_message(
-                    chat_id=user.telegram_id,
-                    text=user_message,
-                    parse_mode="HTML",
-                    reply_markup=kb.as_markup(),
-                )
-            except Exception as send_err:
-                logging.error(
-                    f"❌ Не удалось отправить сообщение пользователю о начале работ по заявке #{request_id}: {send_err}"
-                )
-
-            await update_chat_keyboard(callback.bot, request_id)
-            await callback.answer("✅ Заявка в работе")
 
         except Exception as e:
             await session.rollback()
-            logging.error(f"❌ Ошибка перевода заявки #{request_id} в работу: {e}")
-            await callback.answer("❌ Ошибка при изменении статуса", show_alert=True)
+            logging.error(
+                f"❌ Ошибка при подтверждении условий клиентом для заявки #{request_id}: {e}"
+            )
+            await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
+            return
+
+    # Бонус за принятие условий
+    try:
+        await add_bonus(callback.from_user.id, "accept_offer", description=f"Принятие условий по заявке #{request_id}")
+    except Exception as bonus_err:
+        logging.error(f"❌ Ошибка начисления бонуса за принятие условий: {bonus_err}")
+
+    # Сообщение клиенту
+    await callback.answer("✅ Вы приняли условия сервиса.", show_alert=True)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # Уведомляем менеджеров
+    try:
+        await callback.bot.send_message(
+            chat_id=config.MANAGER_CHAT_ID,
+            text=(
+                f"✅ Клиент принял условия по заявке #{request_id}.\n"
+                f"Теперь вы можете подтвердить заявку, взять её в работу или отменить."
+            ),
+        )
+        await update_chat_keyboard(callback.bot, request_id)
+    except Exception as e:
+        logging.error(
+            f"❌ Не удалось уведомить менеджеров о принятии условий по заявке #{request_id}: {e}"
+        )
 
 
-async def complete_request(callback: CallbackQuery, request_id: int):
-    """Завершить заявку (completed)."""
+@router.callback_query(F.data.startswith("offer_reject:"))
+async def client_reject_offer(callback: CallbackQuery):
+    """
+    Клиент отклоняет условия сервиса по заявке.
+    """
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
     async with AsyncSessionLocal() as session:
         try:
-            data = await _load_request_with_user(session, request_id)
-            if not data:
+            result = await session.execute(
+                select(Request, User)
+                .join(User, Request.user_id == User.id)
+                .where(Request.id == request_id)
+            )
+            row = result.first()
+            if not row:
                 await callback.answer("❌ Заявка не найдена", show_alert=True)
                 return
 
-            request, user = data
-            current_status = request.status or "new"
-            logging.info(f"✅ complete_request #{request_id}, current_status={current_status}")
+            request, user = row
 
-            if current_status in ("rejected", "completed"):
+            if user.telegram_id != callback.from_user.id:
                 await callback.answer(
-                    "❌ Заявка уже завершена или отклонена",
+                    "❌ Эта заявка принадлежит другому пользователю",
                     show_alert=True,
                 )
                 return
 
-            if current_status != "in_progress":
+            if request.status != "offer_sent":
                 await callback.answer(
-                    "❌ Завершить можно только заявку, находящуюся в работе",
-                    show_alert=True,
-                )
-                return
-
-            request.status = "completed"
-            request.completed_at = datetime.now()
-            await session.commit()
-            logging.info(f"✅ Заявка #{request_id} завершена в {request.completed_at}")
-
-            # Уведомляем пользователя
-            try:
-                await callback.bot.send_message(
-                    chat_id=user.telegram_id,
-                    text=(
-                        "✅ <b>Работы по вашей заявке завершены.</b>\n\n"
-                        f"📋 <b>Номер заявки:</b> #{request.id}\n"
-                        f"🛠️ <b>Услуга:</b> {request.service_type}"
-                    ),
-                    parse_mode="HTML",
-                )
-            except Exception as send_err:
-                logging.error(
-                    f"❌ Не удалось отправить сообщение пользователю о завершении заявки #{request_id}: {send_err}"
-                )
-
-            await update_chat_keyboard(callback.bot, request_id)
-            await callback.answer("✅ Заявка завершена")
-
-        except Exception as e:
-            await session.rollback()
-            logging.error(f"❌ Ошибка завершения заявки #{request_id}: {e}")
-            await callback.answer("❌ Ошибка при изменении статуса", show_alert=True)
-
-
-async def reject_request(callback: CallbackQuery, request_id: int):
-    """Отклонить заявку (rejected). Сейчас разрешено только из статуса NEW."""
-    async with AsyncSessionLocal() as session:
-        try:
-            data = await _load_request_with_user(session, request_id)
-            if not data:
-                await callback.answer("❌ Заявка не найдена", show_alert=True)
-                return
-
-            request, user = data
-            current_status = request.status or "new"
-            logging.info(f"✅ reject_request #{request_id}, current_status={current_status}")
-
-            # Нельзя второй раз отклонять или трогать завершённые
-            if current_status in ("rejected", "completed"):
-                await callback.answer(
-                    "❌ Заявка уже завершена или отклонена",
-                    show_alert=True,
-                )
-                return
-
-            # Важное изменение: отклонить можно только пока заявка новая.
-            if current_status != "new":
-                await callback.answer(
-                    "❌ Отклонить можно только новую заявку до согласования с клиентом",
+                    "Статус заявки не позволяет отклонить условия",
                     show_alert=True,
                 )
                 return
@@ -254,28 +439,312 @@ async def reject_request(callback: CallbackQuery, request_id: int):
             request.status = "rejected"
             request.rejected_at = datetime.now()
             await session.commit()
-            logging.info(f"❌ Заявка #{request_id} отклонена в {request.rejected_at}")
-
-            # Сообщаем клиенту
-            try:
-                await callback.bot.send_message(
-                    chat_id=user.telegram_id,
-                    text=(
-                        "❌ <b>К сожалению, ваша заявка была отклонена.</b>\n\n"
-                        f"📋 <b>Номер заявки:</b> #{request.id}\n"
-                        f"🛠️ <b>Услуга:</b> {request.service_type}"
-                    ),
-                    parse_mode="HTML",
-                )
-            except Exception as send_err:
-                logging.error(
-                    f"❌ Не удалось отправить сообщение пользователю об отклонении заявки #{request_id}: {send_err}"
-                )
-
-            await update_chat_keyboard(callback.bot, request_id)
-            await callback.answer("✅ Заявка отклонена")
 
         except Exception as e:
             await session.rollback()
-            logging.error(f"❌ Ошибка отклонения заявки #{request_id}: {e}")
-            await callback.answer("❌ Ошибка при изменении статуса", show_alert=True)
+            logging.error(
+                f"❌ Ошибка при отказе от условий клиентом для заявки #{request_id}: {e}"
+            )
+            await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
+            return
+
+    await callback.answer("❌ Вы отклонили условия.", show_alert=True)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # Уведомляем менеджеров
+    try:
+        await callback.bot.send_message(
+            chat_id=config.MANAGER_CHAT_ID,
+            text=(
+                f"❌ Клиент отклонил условия по заявке #{request_id}.\n"
+                f"Вы можете предложить новые условия или оставить заявку в отклонённых."
+            ),
+        )
+        await update_chat_keyboard(callback.bot, request_id)
+    except Exception as e:
+        logging.error(
+            f"❌ Не удалось уведомить менеджеров об отказе по заявке #{request_id}: {e}"
+        )
+
+
+# =======================
+# 3. Менеджер: принять / взять в работу / завершить / отменить
+# =======================
+
+
+@router.callback_query(F.data.startswith("chat_confirm:"))
+async def manager_confirm_after_client(callback: CallbackQuery):
+    """
+    Менеджер подтверждает заявку после того, как клиент принял условия.
+    Статус: accepted_by_client -> accepted
+    """
+    if not _ensure_manager_chat(callback):
+        await callback.answer("Доступно только в чате менеджеров", show_alert=True)
+        return
+
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        try:
+            data = await _load_request_with_user(session, request_id)
+            if not data:
+                await callback.answer("❌ Заявка не найдена", show_alert=True)
+                return
+
+            request, user = data
+
+            if request.status != "accepted_by_client":
+                await callback.answer(
+                    "Заявка не находится в статусе 'принята клиентом'",
+                    show_alert=True,
+                )
+                return
+
+            request.status = "accepted"
+            if not request.accepted_at:
+                request.accepted_at = datetime.now()
+
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logging.error(
+                f"❌ Ошибка при подтверждении заявки менеджером #{request_id}: {e}"
+            )
+            await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
+            return
+
+    # Уведомляем клиента
+    try:
+        await callback.bot.send_message(
+            chat_id=user.telegram_id,
+            text=(
+                f"✅ Ваша заявка #{request.id} принята сервисом.\n"
+                f"Скоро работы будут начаты."
+            ),
+        )
+    except Exception as e:
+        logging.error(
+            f"❌ Не удалось уведомить клиента о подтверждении заявки #{request_id}: {e}"
+        )
+
+    await update_chat_keyboard(callback.bot, request_id)
+    await callback.answer("✅ Заявка подтверждена")
+
+
+@router.callback_query(F.data.startswith("chat_start:"))
+async def manager_start_work(callback: CallbackQuery):
+    """
+    Менеджер берёт заявку в работу.
+
+    Возможные статусы до этого:
+    - accepted_by_client (прямой старт, минуя отдельное подтверждение)
+    - accepted
+    """
+    if not _ensure_manager_chat(callback):
+        await callback.answer("Доступно только в чате менеджеров", show_alert=True)
+        return
+
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        try:
+            data = await _load_request_with_user(session, request_id)
+            if not data:
+                await callback.answer("❌ Заявка не найдена", show_alert=True)
+                return
+
+            request, user = data
+
+            if request.status not in ("accepted_by_client", "accepted"):
+                await callback.answer(
+                    "Заявку можно взять в работу только после принятия условий клиентом",
+                    show_alert=True,
+                )
+                return
+
+            if not request.accepted_at:
+                request.accepted_at = datetime.now()
+
+            request.status = "in_progress"
+            request.in_progress_at = datetime.now()
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logging.error(
+                f"❌ Ошибка при переводе заявки #{request_id} в работу: {e}"
+            )
+            await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
+            return
+
+    # Уведомляем клиента
+    try:
+        await callback.bot.send_message(
+            chat_id=user.telegram_id,
+            text=(
+                f"🔧 Ваш автомобиль по заявке #{request.id} взят в работу.\n"
+                f"По окончании работ вы получите уведомление."
+            ),
+        )
+    except Exception as e:
+        logging.error(
+            f"❌ Не удалось уведомить клиента о начале работ по заявке #{request_id}: {e}"
+        )
+
+    await update_chat_keyboard(callback.bot, request_id)
+    await callback.answer("✅ Заявка взята в работу")
+
+
+@router.callback_query(F.data.startswith("chat_complete:"))
+async def manager_complete_request(callback: CallbackQuery):
+    """
+    Менеджер завершает заявку (работы выполнены).
+    """
+    if not _ensure_manager_chat(callback):
+        await callback.answer("Доступно только в чате менеджеров", show_alert=True)
+        return
+
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        try:
+            data = await _load_request_with_user(session, request_id)
+            if not data:
+                await callback.answer("❌ Заявка не найдена", show_alert=True)
+                return
+
+            request, user = data
+
+            if request.status != "in_progress":
+                await callback.answer(
+                    "Завершить можно только заявку, находящуюся в работе",
+                    show_alert=True,
+                )
+                return
+
+            request.status = "completed"
+            request.completed_at = datetime.now()
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"❌ Ошибка завершения заявки #{request_id}: {e}")
+            await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
+            return
+
+    # Бонус за завершённую заявку
+    try:
+        await add_bonus(
+            user.telegram_id,
+            "complete_request",
+            description=f"Завершение заявки #{request_id}",
+        )
+    except Exception as bonus_err:
+        logging.error(f"❌ Ошибка начисления бонуса за завершение заявки: {bonus_err}")
+
+    # Уведомляем клиента
+    try:
+        await callback.bot.send_message(
+            chat_id=user.telegram_id,
+            text=(
+                f"✅ Работы по вашей заявке #{request.id} завершены.\n"
+                f"Спасибо за обращение!"
+            ),
+        )
+    except Exception as e:
+        logging.error(
+            f"❌ Не удалось уведомить клиента о завершении заявки #{request_id}: {e}"
+        )
+
+    await update_chat_keyboard(callback.bot, request_id)
+    await callback.answer("✅ Заявка завершена")
+
+
+@router.callback_query(F.data.startswith("chat_cancel:"))
+async def manager_cancel_request(callback: CallbackQuery):
+    """
+    Менеджер отменяет заявку на любом этапе до завершения.
+    """
+    if not _ensure_manager_chat(callback):
+        await callback.answer("Доступно только в чате менеджеров", show_alert=True)
+        return
+
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        try:
+            data = await _load_request_with_user(session, request_id)
+            if not data:
+                await callback.answer("❌ Заявка не найдена", show_alert=True)
+                return
+
+            request, user = data
+
+            if request.status in ("completed", "rejected"):
+                await callback.answer(
+                    "Заявка уже завершена или отклонена", show_alert=True
+                )
+                return
+
+            request.status = "rejected"
+            request.rejected_at = datetime.now()
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"❌ Ошибка отмены заявки #{request_id}: {e}")
+            await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
+            return
+
+    # Уведомляем клиента
+    try:
+        await callback.bot.send_message(
+            chat_id=user.telegram_id,
+            text=(
+                f"❌ Ваша заявка #{request.id} была отменена сервисом.\n"
+                f"При необходимости вы можете создать новую заявку."
+            ),
+        )
+    except Exception as e:
+        logging.error(
+            f"❌ Не удалось отправить сообщение клиенту об отмене заявки #{request_id}: {e}"
+        )
+
+    await update_chat_keyboard(callback.bot, request_id)
+    await callback.answer("✅ Заявка отменена")
+
+
+@router.callback_query(F.data.startswith("chat_refresh:"))
+async def manager_refresh_keyboard(callback: CallbackQuery):
+    """
+    Ручное обновление клавиатуры под заявкой.
+    """
+    if not _ensure_manager_chat(callback):
+        await callback.answer("Доступно только в чате менеджеров", show_alert=True)
+        return
+
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    await update_chat_keyboard(callback.bot, request_id)
+    await callback.answer("🔄 Обновлено")

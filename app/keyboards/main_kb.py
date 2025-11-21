@@ -20,6 +20,11 @@ def get_main_kb():
         InlineKeyboardButton(
             text="ℹ️ Помощь", callback_data="help")
     )
+    # ✅ Новая кнопка бонусов
+    builder.row(
+        InlineKeyboardButton(
+            text="🎁 Мои бонусы", callback_data="my_points")
+    )
     return builder.as_markup()
 
 
@@ -182,10 +187,13 @@ def get_aggregates_subtypes_kb():
 
 # Клавиатура для фото (прикрепить / пропустить)
 def get_photo_skip_kb():
+    """
+    Выбор: отправить одно фото или пропустить этап.
+    """
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="📷 Прикрепить фото", callback_data="attach_photo"),
-        InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_photo")
+        InlineKeyboardButton(text="📷 Отправить фото", callback_data="attach_photo"),
+        InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_photo"),
     )
     builder.row(
         InlineKeyboardButton(text="❌ Отменить заявку", callback_data="cancel_request")
