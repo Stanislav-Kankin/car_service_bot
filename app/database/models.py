@@ -14,10 +14,13 @@ class User(Base):
     full_name = Column(String(200), nullable=False)
     phone_number = Column(String(20))
     registered_at = Column(DateTime(timezone=True), server_default=func.now())
-    # Баллы лояльности
     points = Column(Integer, nullable=False, default=0)
-    # Роль пользователя: client / service
     role = Column(String(20), nullable=False, default="client")
+
+    # ✅ Дополнительные поля для автосервиса
+    service_name = Column(String(200))      # Название сервиса
+    service_address = Column(String(255))   # Адрес сервиса
+
 
 
 class Car(Base):

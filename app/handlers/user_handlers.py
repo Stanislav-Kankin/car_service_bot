@@ -55,6 +55,8 @@ class RequestForm(StatesGroup):
 class Registration(StatesGroup):
     role = State()
     name = State()
+    service_name = State()
+    service_address = State()
     phone = State()
 
 
@@ -183,11 +185,63 @@ async def process_name_registration(message: Message, state: FSMContext):
         )
         return
 
+    data = await state.get_data()
+    role = data.get("role") or "client"
+
     await state.update_data(name=name)
 
+    # Если это клиент — сразу просим телефон
+    if role == "client":
+        await message.answer(
+            f"✅ Приятно познакомиться, {name}!\n\n"
+            "Теперь нажмите на кнопку ниже, чтобы отправить номер телефона:",
+            reply_markup=get_phone_reply_kb(),
+        )
+        await state.set_state(Registration.phone)
+    else:
+        # Автосервис — спрашиваем название сервиса
+        await message.answer(
+            f"✅ Отлично, {name}!\n\n"
+            "Укажите, пожалуйста, <b>название автосервиса</b> "
+            "(как его видит клиент, например, «СТО АвтоЛюкс»):",
+            parse_mode="HTML",
+        )
+        await state.set_state(Registration.service_name)
+
+
+@router.message(Registration.service_name)
+async def process_service_name(message: Message, state: FSMContext):
+    service_name = (message.text or "").strip()
+    if len(service_name) < 2:
+        await message.answer(
+            "❌ Название слишком короткое. Пожалуйста, укажите корректное название сервиса:"
+        )
+        return
+
+    await state.update_data(service_name=service_name)
+
     await message.answer(
-        f"✅ Приятно познакомиться, {name}!\n\n"
-        "Теперь нажмите на кнопку ниже, чтобы отправить номер телефона:",
+        "Теперь укажите, пожалуйста, <b>адрес автосервиса</b>.\n\n"
+        "Можно в свободной форме: город, улица, дом, ориентиры.",
+        parse_mode="HTML",
+    )
+    await state.set_state(Registration.service_address)
+
+
+@router.message(Registration.service_address)
+async def process_service_address(message: Message, state: FSMContext):
+    address = (message.text or "").strip()
+    if len(address) < 5:
+        await message.answer(
+            "❌ Адрес слишком короткий. Пожалуйста, укажите более подробный адрес:"
+        )
+        return
+
+    await state.update_data(service_address=address)
+
+    # И теперь уже просим телефон, как и у клиента
+    await message.answer(
+        "Отлично! Теперь нажмите на кнопку ниже, чтобы отправить номер телефона:",
         reply_markup=get_phone_reply_kb(),
     )
     await state.set_state(Registration.phone)
@@ -195,9 +249,6 @@ async def process_name_registration(message: Message, state: FSMContext):
 
 @router.message(Registration.phone)
 async def process_phone_registration(message: Message, state: FSMContext):
-    """
-    Обработка телефона (контакта) при регистрации.
-    """
     if not message.contact:
         await message.answer(
             "📱 Пожалуйста, используйте кнопку для отправки номера телефона:",
@@ -209,33 +260,43 @@ async def process_phone_registration(message: Message, state: FSMContext):
     data = await state.get_data()
     name = data.get("name") or (message.from_user.full_name or "").strip() or "Без имени"
     role = data.get("role") or "client"
+    service_name = data.get("service_name")
+    service_address = data.get("service_address")
 
     async with AsyncSessionLocal() as session:
         try:
-            # Проверяем, нет ли уже пользователя
             result = await session.execute(
                 select(User).where(User.telegram_id == message.from_user.id)
             )
             user = result.scalar_one_or_none()
 
             if user:
-                # Обновляем данные
                 user.full_name = name
                 user.phone_number = phone_number
                 user.role = role
+
+                if role == "service":
+                    user.service_name = service_name
+                    user.service_address = service_address
+
                 await session.commit()
-                logging.info(f"🔄 Обновлена регистрация пользователя {message.from_user.id} (role={role})")
+                logging.info(
+                    f"🔄 Обновлена регистрация пользователя {message.from_user.id} (role={role})"
+                )
             else:
-                # Создаем нового пользователя
                 new_user = User(
                     telegram_id=message.from_user.id,
                     full_name=name,
                     phone_number=phone_number,
                     role=role,
+                    service_name=service_name if role == "service" else None,
+                    service_address=service_address if role == "service" else None,
                 )
                 session.add(new_user)
                 await session.commit()
-                logging.info(f"✅ Зарегистрирован новый пользователь {message.from_user.id} (role={role})")
+                logging.info(
+                    f"✅ Зарегистрирован новый пользователь {message.from_user.id} (role={role})"
+                )
 
         except Exception as e:
             await session.rollback()
@@ -251,7 +312,7 @@ async def process_phone_registration(message: Message, state: FSMContext):
 
     await message.answer(
         "✅ Регистрация завершена!\n\n"
-        "Теперь вы можете управлять своими автомобилями и создавать заявки на услуги.",
+        "Теперь вы можете работать с ботом.",
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -411,7 +472,14 @@ async def my_garage(callback: CallbackQuery, state: FSMContext):
             else:
                 await msg.answer(text, reply_markup=get_main_kb())
 
-    await callback.answer()
+        # В конце — аккуратно отвечаем только на “живой” callback
+    try:
+        if getattr(callback, "id", None) != "fake":
+            await callback.answer()
+    except Exception:
+        # На всякий случай вообще не падаем из-за answer()
+        pass
+
 
 
 
