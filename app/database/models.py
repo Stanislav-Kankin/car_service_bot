@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String,
-    BigInteger, Text, DateTime, ForeignKey
+    BigInteger, Text, DateTime, ForeignKey, Float, Boolean
 )
 from sqlalchemy.sql import func
 from app.database.base import Base
@@ -14,7 +14,7 @@ class User(Base):
     full_name = Column(String(200), nullable=False)
     phone_number = Column(String(20))
     registered_at = Column(DateTime(timezone=True), server_default=func.now())
-    # ✅ Баллы лояльности пользователя
+    # Баллы лояльности
     points = Column(Integer, nullable=False, default=0)
 
 
@@ -27,6 +27,8 @@ class Car(Base):
     model = Column(String(100), nullable=False)
     year = Column(Integer)
     license_plate = Column(String(20))
+    # ✅ VIN — теперь часть карточки автомобиля
+    vin = Column(String(50))
 
 
 class Request(Base):
@@ -35,10 +37,22 @@ class Request(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     car_id = Column(Integer, ForeignKey('cars.id', ondelete='CASCADE'), nullable=False)
+
     service_type = Column(String(50), nullable=False)
     description = Column(Text)
     photo_file_id = Column(String(255))
+
+    # ✅ Текущее местоположение
+    location_lat = Column(Float)
+    location_lon = Column(Float)
+    location_description = Column(Text)
+
+    # ✅ Может ли авто ехать своим ходом
+    can_drive = Column(Boolean, default=True)
+
+    # Желаемые сроки выполнения (как и было)
     preferred_date = Column(String(100))
+
     status = Column(String(50), default='new')
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     manager_comment = Column(Text)

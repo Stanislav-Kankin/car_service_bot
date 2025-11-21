@@ -146,6 +146,24 @@ def _format_request_text(request: Request, user: User, car: Optional[Car]) -> st
         else "неизвестно"
     )
 
+    # Информация о передвижении и местоположении
+    drive_text = "Не указано"
+    if request.can_drive is True:
+        drive_text = "Да, может ехать сам"
+    elif request.can_drive is False:
+        drive_text = "Нет, требуется эвакуатор/перевозка"
+
+    if request.location_lat and request.location_lon:
+        location_text = (
+            f"📍 Местоположение:\n"
+            f"   • Координаты: {request.location_lat:.5f}, {request.location_lon:.5f}\n"
+            f"   • Ссылка: https://maps.google.com/?q={request.location_lat:.5f},{request.location_lon:.5f}"
+        )
+    elif request.location_description:
+        location_text = f"📍 Местоположение:\n   • {request.location_description}"
+    else:
+        location_text = "📍 Местоположение: не указано"
+
     text = (
         f"📋 Заявка #{request.id}\n\n"
         f"👤 Клиент: {user.full_name or 'Не указано'}\n"
@@ -154,6 +172,8 @@ def _format_request_text(request: Request, user: User, car: Optional[Car]) -> st
         f"{car_block}\n\n"
         f"🛠️ Услуга: {request.service_type}\n\n"
         f"📝 Описание:\n{request.description}\n\n"
+        f"🚚 Может ехать сам: {drive_text}\n"
+        f"{location_text}\n\n"
         f"📊 Статус: {_format_status(request.status)}\n"
         f"⏰ Создана: {created_at}\n\n"
         "ℹ️ Чтобы ответить по заявке, нажмите нужную кнопку ниже.\n"

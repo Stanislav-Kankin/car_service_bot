@@ -19,7 +19,8 @@ from app.keyboards.main_kb import (
     get_service_types_kb, get_tire_subtypes_kb,
     get_electric_subtypes_kb, get_aggregates_subtypes_kb,
     get_photo_skip_kb, get_request_confirm_kb,
-    get_delete_confirm_kb, get_history_kb, get_edit_cancel_kb
+    get_delete_confirm_kb, get_history_kb, get_edit_cancel_kb,
+    get_can_drive_kb, get_location_reply_kb,
 )
 from app.config import config
 
@@ -28,23 +29,28 @@ class CarForm(StatesGroup):
     brand = State()
     model = State()
     year = State()
+    vin = State()
     license_plate = State()
     # состояния для редактирования
     edit_brand = State()
     edit_model = State()
     edit_year = State()
+    edit_vin = State()
     edit_license_plate = State()
 
 
 class RequestForm(StatesGroup):
-    # Основной тип услуги (группа работ: автомойка, шиномонтаж и т.п.)
+    # Основной тип услуги (группа работ)
     service_type = State()
-    # Подтип услуги (выездной/стационарный, конкретный агрегат и т.п.)
+    # Подтип услуги
     service_subtype = State()
     description = State()
     photo = State()
+    can_drive = State()
+    location = State()
     preferred_date = State()
     confirm = State()
+
 
 
 router = Router()
@@ -222,9 +228,13 @@ async def process_phone_registration(message: Message, state: FSMContext):
 
 
 # Обработчик нажатия на "Мой гараж"
-@router.callback_query(F.data == "my_garage")
 async def my_garage(callback: CallbackQuery, state: FSMContext):
     await state.clear()
+
+    msg = callback.message
+    # Сообщение бота, если отправитель сообщения != пользователь, который нажал кнопку
+    is_bot_message = msg.from_user.id != callback.from_user.id
+
     async with AsyncSessionLocal() as session:
         try:
             # Получаем пользователя
@@ -232,56 +242,88 @@ async def my_garage(callback: CallbackQuery, state: FSMContext):
                 select(User).where(User.telegram_id == callback.from_user.id)
             )
             user = result.scalar_one_or_none()
-            
+
+            # Если пользователь не найден — просим зарегистрироваться
             if not user:
-                await callback.message.edit_text(
-                    "❌ Вы еще не зарегистрированы. Нажмите /start для регистрации.",
-                    reply_markup=None
+                text = (
+                    "❌ Вы еще не зарегистрированы.\n"
+                    "Нажмите /start для регистрации."
                 )
+                if is_bot_message:
+                    await msg.edit_text(text, reply_markup=None)
+                else:
+                    await msg.answer(text, reply_markup=None)
+
                 await callback.answer()
                 return
-            
+
             # Получаем автомобили
             result = await session.execute(
                 select(Car).where(Car.user_id == user.id)
             )
             cars = result.scalars().all()
-            
+
+            # Если в гараже нет машин
             if not cars:
-                await callback.message.edit_text(
+                text = (
                     "🚗 В вашем гараже пока нет автомобилей.\n\n"
-                    "Нажмите кнопку ниже, чтобы добавить первый автомобиль:",
-                    reply_markup=get_garage_kb()
+                    "Нажмите кнопку ниже, чтобы добавить первый автомобиль:"
                 )
+                kb = get_garage_kb()
+
+                if is_bot_message:
+                    await msg.edit_text(text, reply_markup=kb)
+                else:
+                    await msg.answer(text, reply_markup=kb)
             else:
+                # Строим список машин
                 builder = InlineKeyboardBuilder()
                 for car in cars:
                     builder.row(
                         InlineKeyboardButton(
                             text=f"🚗 {car.brand} {car.model}",
-                            callback_data=f"select_car:{car.id}"
+                            callback_data=f"select_car:{car.id}",
                         )
                     )
                 builder.row(
                     InlineKeyboardButton(
-                        text="➕ Добавить автомобиль", callback_data="add_car")
+                        text="➕ Добавить автомобиль",
+                        callback_data="add_car",
+                    )
                 )
                 builder.row(
                     InlineKeyboardButton(
-                        text="⬅️ В меню", callback_data="back_to_main")
+                        text="⬅️ В меню",
+                        callback_data="back_to_main",
+                    )
                 )
-                
-                await callback.message.edit_text(
-                    "🚗 Ваш гараж:\n\nВыберите автомобиль для управления или добавьте новый:",
-                    reply_markup=builder.as_markup()
+
+                text = (
+                    "🚗 Ваш гараж:\n\n"
+                    "Выберите автомобиль для управления или добавьте новый:"
                 )
+                kb = builder.as_markup()
+
+                if is_bot_message:
+                    await msg.edit_text(text, reply_markup=kb)
+                else:
+                    await msg.answer(text, reply_markup=kb)
+
         except Exception as e:
             logging.error(f"❌ Ошибка при загрузке гаража: {e}")
-            await callback.message.edit_text(
-                "❌ Ошибка при загрузке гаража. Попробуйте позже.",
-                reply_markup=get_main_kb()
-            )
+            text = "❌ Ошибка при загрузке гаража. Попробуйте позже."
+
+            # В случае ошибки тоже стараемся не редактировать пользовательские сообщения
+            if is_bot_message:
+                try:
+                    await msg.edit_text(text, reply_markup=get_main_kb())
+                except Exception:
+                    await msg.answer(text, reply_markup=get_main_kb())
+            else:
+                await msg.answer(text, reply_markup=get_main_kb())
+
     await callback.answer()
+
 
 
 # Обработчик кнопки "Добавить автомобиль"
@@ -365,6 +407,26 @@ async def process_car_year(message: Message, state: FSMContext):
 
     await state.update_data(year=year)
     await message.answer(
+        "Введите VIN автомобиля (17 символов, если знаете).\n"
+        "Если VIN неизвестен — можете указать любое удобное обозначение или написать «нет».",
+        reply_markup=get_car_cancel_kb()
+    )
+    await state.set_state(CarForm.vin)
+
+
+@router.message(CarForm.vin)
+async def process_car_vin(message: Message, state: FSMContext):
+    vin = (message.text or "").strip().upper()
+
+    if len(vin) < 3:
+        await message.answer(
+            "❌ VIN слишком короткий. Укажите хотя бы 3 символа или напишите «нет»:",
+            reply_markup=get_car_cancel_kb()
+        )
+        return
+
+    await state.update_data(vin=vin)
+    await message.answer(
         "Введите госномер автомобиля (например, А123ВС777):",
         reply_markup=get_car_cancel_kb()
     )
@@ -387,6 +449,7 @@ async def process_car_license_plate(message: Message, state: FSMContext):
     brand = data.get("brand")
     model = data.get("model")
     year = data.get("year")
+    vin = data.get("vin")
 
     async with AsyncSessionLocal() as session:
         try:
@@ -410,7 +473,8 @@ async def process_car_license_plate(message: Message, state: FSMContext):
                 brand=brand,
                 model=model,
                 year=year,
-                license_plate=license_plate
+                license_plate=license_plate,
+                vin=vin,
             )
             session.add(new_car)
             await session.commit()
@@ -618,6 +682,103 @@ async def process_edit_brand(message: Message, state: FSMContext):
         data=f"select_car:{car_id}"
     )
     await select_car(fake_callback, state)
+
+
+#  Обработчик геолокации
+@router.message(RequestForm.location, F.location)
+async def process_location_geo(message: Message, state: FSMContext):
+    loc = message.location
+    await state.update_data(
+        location_lat=loc.latitude,
+        location_lon=loc.longitude,
+        location_description=None,
+    )
+
+    await message.answer(
+        "✅ Местоположение получено.\n\n"
+        "⏰ Теперь укажите, когда вам удобно выполнить работу.\n"
+        "Напишите удобное время в свободной форме (например, «Сегодня после 18:00»).",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await state.set_state(RequestForm.preferred_date)
+
+
+@router.message(RequestForm.location)
+async def process_location_text(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+
+    # Пропуск локации
+    if text.lower().startswith("⏭️".lower()) or "пропустить" in text.lower():
+        await state.update_data(
+            location_lat=None,
+            location_lon=None,
+            location_description=None,
+        )
+    else:
+        # Сохраняем текстовый адрес
+        await state.update_data(
+            location_lat=None,
+            location_lon=None,
+            location_description=text,
+        )
+
+    await message.answer(
+        "⏰ Когда вам удобно выполнить работу?\n\n"
+        "Напишите удобное время в свободной форме (например, «Сегодня после 18:00»).",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await state.set_state(RequestForm.preferred_date)
+
+#  Учитываем может ли ехать + гео
+@router.message(RequestForm.preferred_date)
+async def process_preferred_date(message: Message, state: FSMContext):
+    preferred = (message.text or "").strip()
+    if len(preferred) < 3:
+        await message.answer(
+            "❌ Слишком короткий ответ. Пожалуйста, укажите, когда вам удобно:",
+            reply_markup=get_car_cancel_kb(),
+        )
+        return
+
+    await state.update_data(preferred_date=preferred)
+    data = await state.get_data()
+
+    service_type = data.get("service_type", "Не указано")
+    description = data.get("description", "Не указано")
+    photo_id = data.get("photo")
+    photos_text = "есть" if photo_id else "нет"
+
+    can_drive = data.get("can_drive")
+    if can_drive is True:
+        can_drive_text = "Да, может ехать сам"
+    elif can_drive is False:
+        can_drive_text = "Нет, нужен эвакуатор/прицеп"
+    else:
+        can_drive_text = "Не указано"
+
+    loc_lat = data.get("location_lat")
+    loc_lon = data.get("location_lon")
+    loc_desc = data.get("location_description")
+
+    if loc_lat and loc_lon:
+        location_text = f"Геолокация (координаты: {loc_lat:.5f}, {loc_lon:.5f})"
+    elif loc_desc:
+        location_text = f"Адрес/место: {loc_desc}"
+    else:
+        location_text = "Не указано"
+
+    await message.answer(
+        "📄 Заявка на услугу\n\n"
+        f"🔧 Услуга: {service_type}\n"
+        f"📝 Описание: {description}\n"
+        f"📷 Фото: {photos_text}\n"
+        f"🚚 Может ехать сам: {can_drive_text}\n"
+        f"📍 Местоположение: {location_text}\n"
+        f"⏰ Когда удобно: {preferred}\n\n"
+        "Подтвердите создание заявки:",
+        reply_markup=get_request_confirm_kb(),
+    )
+    await state.set_state(RequestForm.confirm)
 
 
 @router.message(CarForm.edit_model)
@@ -1144,41 +1305,54 @@ async def attach_photo(callback: CallbackQuery, state: FSMContext):
 @router.message(RequestForm.photo, F.photo)
 async def process_photo(message: Message, state: FSMContext):
     """
-    Принимаем одно фото, сохраняем его в состоянии и переходим к выбору времени.
+    Принимаем одно фото, сохраняем его в состоянии и переходим к вопросу
+    о возможности самостоятельного передвижения авто.
     """
-    file_id = message.photo[-1].file_id  # берём самое большое (последнее) превью
+    file_id = message.photo[-1].file_id  # самое большое превью
     
     await state.update_data(photo=file_id)
     
     await message.answer(
         "✅ Фото получено.\n\n"
-        "⏰ Теперь укажите, когда вам удобно выполнить работу.\n"
-        "Напишите удобное время в свободной форме, например:\n"
-        "• «Сегодня после 18:00»\n"
-        "• «Завтра утром»\n"
-        "• «В выходные, любой день»\n"
-        "• или конкретную дату и время.",
-        reply_markup=get_car_cancel_kb(),
+        "Может ли автомобиль передвигаться своим ходом?",
+        reply_markup=get_can_drive_kb(),
     )
-    await state.set_state(RequestForm.preferred_date)
+    await state.set_state(RequestForm.can_drive)
 
 
 @router.callback_query(RequestForm.photo, F.data == "skip_photo")
 async def skip_photo(callback: CallbackQuery, state: FSMContext):
     """
     Пользователь решил не прикреплять фото.
-    Переходим к сбору информации о времени.
+    Переходим к вопросу: может ли авто ехать само.
     """
     await callback.message.edit_text(
-        "⏰ Когда вам удобно выполнить работу?\n\n"
-        "Напишите удобное время в свободной форме, например:\n"
-        "• «Сегодня после 18:00»\n"
-        "• «Завтра утром»\n"
-        "• «В выходные, любой день»\n"
-        "• или конкретную дату и время.",
-        reply_markup=get_car_cancel_kb(),
+        "Может ли автомобиль передвигаться своим ходом?",
+        reply_markup=get_can_drive_kb(),
     )
-    await state.set_state(RequestForm.preferred_date)
+    await state.set_state(RequestForm.can_drive)
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.can_drive, F.data.in_(["can_drive_yes", "can_drive_no"]))
+async def process_can_drive(callback: CallbackQuery, state: FSMContext):
+    can_drive = callback.data == "can_drive_yes"
+    await state.update_data(can_drive=can_drive)
+
+    text = (
+        "📍 Теперь укажем текущее местоположение автомобиля.\n\n"
+        "Вы можете:\n"
+        "• отправить геолокацию кнопкой ниже;\n"
+        "• или написать адрес/ориентиры вручную.\n\n"
+        "Если не хотите указывать местоположение, нажмите «⏭️ Пропустить локацию»."
+    )
+
+    await callback.message.edit_text(text)
+    await callback.message.answer(
+        "Отправьте геолокацию или введите адрес:",
+        reply_markup=get_location_reply_kb(),
+    )
+    await state.set_state(RequestForm.location)
     await callback.answer()
 
 
@@ -1216,20 +1390,25 @@ async def process_preferred_date(message: Message, state: FSMContext):
 @router.callback_query(RequestForm.confirm, F.data == "confirm_request")
 async def confirm_request(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    
+
     car_id = data.get("car_id")
     service_type = data.get("service_type")
     description = data.get("description")
-    photo_id = data.get("photo")  # <-- одно фото
+    photo_id = data.get("photo")
     preferred_date = data.get("preferred_date")
-    
+
+    can_drive = data.get("can_drive")
+    loc_lat = data.get("location_lat")
+    loc_lon = data.get("location_lon")
+    loc_desc = data.get("location_description")
+
     async with AsyncSessionLocal() as session:
         try:
             user_result = await session.execute(
                 select(User).where(User.telegram_id == callback.from_user.id)
             )
             user = user_result.scalar_one_or_none()
-            
+
             if not user:
                 await callback.message.edit_text(
                     "❌ Пользователь не найден. Начните с /start",
@@ -1238,12 +1417,12 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
                 await state.clear()
                 await callback.answer()
                 return
-            
+
             car_result = await session.execute(
                 select(Car).where(Car.id == car_id, Car.user_id == user.id)
             )
             car = car_result.scalar_one_or_none()
-            
+
             if not car:
                 await callback.message.edit_text(
                     "❌ Автомобиль не найден.",
@@ -1252,15 +1431,19 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
                 await state.clear()
                 await callback.answer()
                 return
-            
+
             new_request = Request(
                 user_id=user.id,
                 car_id=car.id,
                 service_type=service_type,
                 description=description,
-                photo_file_id=photo_id,  # <-- тут просто строка или None
+                photo_file_id=photo_id,
                 status="new",
                 preferred_date=preferred_date,
+                can_drive=can_drive,
+                location_lat=loc_lat,
+                location_lon=loc_lon,
+                location_description=loc_desc,
             )
 
             session.add(new_request)

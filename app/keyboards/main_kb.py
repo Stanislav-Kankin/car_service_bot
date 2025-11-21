@@ -365,3 +365,52 @@ def get_manager_requests_list_kb(requests_ids, current_index: int):
         )
     
     return builder.as_markup()
+
+
+def get_can_drive_kb():
+    """
+    Клавиатура для вопроса:
+    Может ли автомобиль передвигаться своим ходом?
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Да, может ехать сам",
+            callback_data="can_drive_yes",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🚚 Нет, нужен эвакуатор/прицеп",
+            callback_data="can_drive_no",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="❌ Отменить заявку",
+            callback_data="cancel_request",
+        )
+    )
+    return builder.as_markup()
+
+
+def get_location_reply_kb():
+    """
+    Reply-клавиатура для отправки геолокации или текстового адреса.
+    """
+    builder = ReplyKeyboardBuilder()
+    builder.row(
+        KeyboardButton(
+            text="📍 Отправить геолокацию",
+            request_location=True,
+        )
+    )
+    builder.row(
+        KeyboardButton(
+            text="⏭️ Пропустить локацию",
+        )
+    )
+    return builder.as_markup(
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
