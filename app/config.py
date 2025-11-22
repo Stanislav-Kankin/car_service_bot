@@ -68,12 +68,14 @@ class Config:
         BONUS_NEW_REQUEST = int(os.getenv("BONUS_NEW_REQUEST", "5"))     # Оставил заявку
         BONUS_ACCEPT_OFFER = int(os.getenv("BONUS_ACCEPT_OFFER", "3"))   # Принял условия
         BONUS_COMPLETE_REQUEST = int(os.getenv("BONUS_COMPLETE_REQUEST", "2"))  # Заявка завершена
+        BONUS_RATE_SERVICE = int(os.getenv("BONUS_RATE_SERVICE", "10"))  # Оценка сервиса
     except ValueError:
         # Фоллбек, если в .env задали мусор
         BONUS_REGISTER = 10
         BONUS_NEW_REQUEST = 5
         BONUS_ACCEPT_OFFER = 3
         BONUS_COMPLETE_REQUEST = 2
+        BONUS_RATE_SERVICE=10
 
     @classmethod
     def validate(cls):

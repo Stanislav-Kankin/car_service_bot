@@ -10,7 +10,7 @@ import logging
 
 from app.services.notification_service import notify_manager_about_new_request
 from app.services.bonus_service import add_bonus, get_user_balance
-from app.database.models import User, Car, Request, ServiceCenter
+from app.database.models import User, Car, Request, ServiceCenter, Comment
 from app.database.db import AsyncSessionLocal
 from app.keyboards.main_kb import (
     get_main_kb, get_registration_kb,
@@ -2337,3 +2337,107 @@ async def bind_group_cmd(message: Message):
         "✅ Эта группа успешно привязана к вашему автосервису.\n"
         "Теперь все новые заявки будут отправляться сюда.",
     )
+
+
+@router.callback_query(F.data.startswith("rate_request:"))
+async def handle_rate_request(callback: CallbackQuery):
+    """
+    Клиент ставит оценку сервису по заявке.
+
+    Формат callback_data:
+        rate_request:<request_id>:<score>
+    """
+    try:
+        _, raw_req_id, raw_score = callback.data.split(":")
+        request_id = int(raw_req_id)
+        score = int(raw_score)
+    except Exception:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    if score < 1 or score > 5:
+        await callback.answer("Оценка должна быть от 1 до 5", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        # 1. Грузим заявку с клиентом и сервисом
+        result = await session.execute(
+            select(Request, User, ServiceCenter)
+            .join(User, Request.user_id == User.id)
+            .join(ServiceCenter, Request.service_center_id == ServiceCenter.id, isouter=True)
+            .where(Request.id == request_id)
+        )
+        row = result.first()
+
+        if not row:
+            await callback.answer("Заявка не найдена", show_alert=True)
+            return
+
+        request, user, service_center = row
+
+        # Проверяем, что оценку ставит владелец заявки
+        if user.telegram_id != callback.from_user.id:
+            await callback.answer("Вы не можете оценить чужую заявку.", show_alert=True)
+            return
+
+        # Разрешаем оценку только по завершённой заявке
+        if request.status != "completed":
+            await callback.answer(
+                "Оценить можно только завершённую заявку.",
+                show_alert=True,
+            )
+            return
+
+        # 2. Проверяем, не ставил ли пользователь уже рейтинг по этой заявке
+        result = await session.execute(
+            select(Comment)
+            .where(
+                Comment.request_id == request.id,
+                Comment.user_id == user.id,
+                Comment.message.like("RATING:%"),
+            )
+        )
+        existing_rating = result.scalar_one_or_none()
+        if existing_rating:
+            await callback.answer("Вы уже оценили этот сервис по данной заявке.", show_alert=True)
+            return
+
+        # 3. Сохраняем "оценочный" комментарий
+        rating_comment = Comment(
+            request_id=request.id,
+            user_id=user.id,
+            message=f"RATING:{score}",
+            is_manager=False,
+        )
+        session.add(rating_comment)
+
+        # 4. Обновляем средний рейтинг сервиса
+        if service_center:
+            old_avg = service_center.rating or 0.0
+            old_count = service_center.ratings_count or 0
+
+            new_count = old_count + 1
+            new_avg = (old_avg * old_count + score) / new_count
+
+            service_center.rating = new_avg
+            service_center.ratings_count = new_count
+
+        try:
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"❌ Ошибка при сохранении оценки по заявке #{request_id}: {e}")
+            await callback.answer("Ошибка при сохранении оценки, попробуйте позже.", show_alert=True)
+            return
+
+    # 5. Начисляем бонус за оценку
+    try:
+        await add_bonus(
+            callback.from_user.id,
+            "rate_service",
+            description=f"Оценка сервиса по заявке #{request_id} на {score}⭐",
+        )
+    except Exception as bonus_err:
+        logging.error(f"⚠️ Не удалось начислить бонус за оценку: {bonus_err}")
+
+    await callback.answer("Спасибо за вашу оценку! 🙌", show_alert=True)

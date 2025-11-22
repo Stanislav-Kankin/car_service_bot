@@ -16,6 +16,7 @@ BONUS_ACTION_MAP: dict[str, int] = {
     "new_request": config.BONUS_NEW_REQUEST,
     "accept_offer": config.BONUS_ACCEPT_OFFER,
     "complete_request": config.BONUS_COMPLETE_REQUEST,
+    "rate_service": config.BONUS_RATE_SERVICE,
 }
 
 

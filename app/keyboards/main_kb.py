@@ -458,3 +458,17 @@ def get_service_notifications_kb():
         )
     )
     return builder.as_markup()
+
+
+def get_rating_kb(request_id: int) -> InlineKeyboardMarkup:
+    """
+    Клавиатура для оценки сервиса по заявке.
+    """
+    builder = InlineKeyboardBuilder()
+    for score in range(1, 6):
+        builder.button(
+            text=f"{score}⭐",
+            callback_data=f"rate_request:{request_id}:{score}",
+        )
+    builder.adjust(5)
+    return builder.as_markup()

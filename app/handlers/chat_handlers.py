@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from app.config import config
 from app.database.db import AsyncSessionLocal
-from app.database.models import Request, User
+from app.database.models import Request, User, ServiceCenter
 from app.services.chat_service import update_chat_keyboard
 from app.services.bonus_service import add_bonus
 
@@ -62,6 +62,75 @@ def _ensure_manager_chat(callback: CallbackQuery) -> bool:
     if not callback.message or not callback.message.chat:
         return False
     return True
+
+
+def _ensure_manager_chat(callback: CallbackQuery) -> bool:
+    """
+    Проверяем, что коллбек пришёл из "менеджерского" контекста.
+    """
+    if not callback.message or not callback.message.chat:
+        return False
+    return True
+
+
+async def _notify_service_about_client_action(
+    bot,
+    session,
+    request: Request,
+    service_center: Optional[ServiceCenter],
+    text: str,
+) -> None:
+    """
+    Отправляет уведомление в основной чат сервиса по заявке.
+
+    Логика выбора чата:
+    - если у заявки есть service_center:
+        • если send_to_group и manager_chat_id → туда
+        • иначе, если send_to_owner → ЛС владельца
+    - иначе — fallback на MANAGER_CHAT_ID (если он задан)
+    """
+    primary_chat_id: Optional[int] = None
+    owner_telegram_id: Optional[int] = None
+
+    # Ищем владельца сервиса, чтобы при необходимости написать ему в ЛС
+    if service_center and service_center.owner_user_id:
+        from sqlalchemy import select as _select
+
+        owner_res = await session.execute(
+            _select(User).where(User.id == service_center.owner_user_id)
+        )
+        owner = owner_res.scalar_one_or_none()
+        if owner and owner.telegram_id:
+            owner_telegram_id = owner.telegram_id
+
+    # Приоритет: группа сервиса → ЛС владельца
+    if service_center:
+        if service_center.send_to_group and service_center.manager_chat_id:
+            primary_chat_id = service_center.manager_chat_id
+        elif service_center.send_to_owner and owner_telegram_id:
+            primary_chat_id = owner_telegram_id
+
+    # Фоллбек на глобальный MANAGER_CHAT_ID (если задан)
+    if primary_chat_id is None and config.MANAGER_CHAT_ID:
+        try:
+            primary_chat_id = int(config.MANAGER_CHAT_ID)
+        except Exception:
+            logging.error(f"❌ Некорректный MANAGER_CHAT_ID: {config.MANAGER_CHAT_ID}")
+            return
+
+    if primary_chat_id is None:
+        logging.error(
+            f"❌ Не удалось определить чат сервиса для уведомления по заявке #{request.id}"
+        )
+        return
+
+    try:
+        await bot.send_message(chat_id=primary_chat_id, text=text)
+    except Exception as e:
+        logging.error(
+            f"❌ Не удалось отправить уведомление в чат сервиса {primary_chat_id} "
+            f"по заявке #{request.id}: {e}"
+        )
 
 
 # =======================
@@ -377,8 +446,13 @@ async def client_accept_offer(callback: CallbackQuery):
     async with AsyncSessionLocal() as session:
         try:
             result = await session.execute(
-                select(Request, User)
+                select(Request, User, ServiceCenter)
                 .join(User, Request.user_id == User.id)
+                .join(
+                    ServiceCenter,
+                    Request.service_center_id == ServiceCenter.id,
+                    isouter=True,
+                )
                 .where(Request.id == request_id)
             )
             row = result.first()
@@ -386,7 +460,7 @@ async def client_accept_offer(callback: CallbackQuery):
                 await callback.answer("❌ Заявка не найдена", show_alert=True)
                 return
 
-            request, user = row
+            request, user, service_center = row
 
             if user.telegram_id != callback.from_user.id:
                 await callback.answer(
@@ -404,6 +478,15 @@ async def client_accept_offer(callback: CallbackQuery):
             request.status = "accepted_by_client"
             request.accepted_at = datetime.now()
             await session.commit()
+
+            # Уведомляем сервис о том, что клиент принял условия
+            await _notify_service_about_client_action(
+                callback.bot,
+                session,
+                request,
+                service_center,
+                text=f"✅ Клиент принял условия по заявке #{request.id}.",
+            )
 
         except Exception as e:
             await session.rollback()
@@ -426,12 +509,13 @@ async def client_accept_offer(callback: CallbackQuery):
     # Сообщение клиенту
     await callback.answer("✅ Вы приняли условия сервиса.", show_alert=True)
 
+    # Убираем кнопки под сообщением клиента
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
 
-        # Обновляем карточку заявки в чате сервиса
+    # Обновляем карточку заявки в чате сервиса (кнопки)
     try:
         await update_chat_keyboard(callback.bot, request_id)
     except Exception as e:
@@ -454,8 +538,13 @@ async def client_reject_offer(callback: CallbackQuery):
     async with AsyncSessionLocal() as session:
         try:
             result = await session.execute(
-                select(Request, User)
+                select(Request, User, ServiceCenter)
                 .join(User, Request.user_id == User.id)
+                .join(
+                    ServiceCenter,
+                    Request.service_center_id == ServiceCenter.id,
+                    isouter=True,
+                )
                 .where(Request.id == request_id)
             )
             row = result.first()
@@ -463,7 +552,7 @@ async def client_reject_offer(callback: CallbackQuery):
                 await callback.answer("❌ Заявка не найдена", show_alert=True)
                 return
 
-            request, user = row
+            request, user, service_center = row
 
             if user.telegram_id != callback.from_user.id:
                 await callback.answer(
@@ -483,6 +572,15 @@ async def client_reject_offer(callback: CallbackQuery):
             request.rejected_at = datetime.now()
             await session.commit()
 
+            # Уведомляем сервис о том, что клиент отклонил условия
+            await _notify_service_about_client_action(
+                callback.bot,
+                session,
+                request,
+                service_center,
+                text=f"❌ Клиент отклонил условия по заявке #{request.id}.",
+            )
+
         except Exception as e:
             await session.rollback()
             logging.error(
@@ -493,12 +591,13 @@ async def client_reject_offer(callback: CallbackQuery):
 
     await callback.answer("❌ Вы отклонили условия.", show_alert=True)
 
+    # Убираем кнопки у клиента
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
 
-        # Обновляем карточку заявки в чате сервиса
+    # Обновляем карточку заявки в чате сервиса (кнопки)
     try:
         await update_chat_keyboard(callback.bot, request_id)
     except Exception as e:

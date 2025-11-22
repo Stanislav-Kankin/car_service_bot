@@ -19,8 +19,8 @@ async def handle_group_callbacks(callback: CallbackQuery, state: FSMContext):
     try:
         logging.info(f"🔔 Callback из группы: {callback.data} от пользователя {callback.from_user.id}")
         
-        # Проверяем права пользователя (is_manager — синхронный)
-        if not is_manager(callback.from_user.id):
+        # Проверяем права пользователя
+        if not await is_manager(callback.from_user.id):
             await callback.answer("❌ У вас нет прав для управления заявками", show_alert=True)
             return
         
@@ -31,76 +31,88 @@ async def handle_group_callbacks(callback: CallbackQuery, state: FSMContext):
         elif callback.data.startswith("manager_reject:"):
             await process_manager_reject(callback, state)
             
-        elif callback.data.startswith("manager_call:"):
-            request_id = int(callback.data.split(":")[1])
-            await process_manager_call(callback, request_id)
-            
-        else:
-            # сюда попадут, например, неизвестные manager_* действия
-            await callback.answer("⚠️ Действие не распознано")
-            
+        elif callback.data.startswith("manager_comment:"):
+            await process_manager_comment(callback, state)
+        
     except Exception as e:
         logging.error(f"❌ Ошибка обработки callback из группы: {e}")
-        await callback.answer("❌ Произошла ошибка", show_alert=True)
+        await callback.answer("Произошла ошибка. Попробуйте ещё раз.", show_alert=True)
 
 
 async def process_manager_accept(callback: CallbackQuery, state: FSMContext):
-    """Обработка принятия заявки из группы"""
+    """Обработка принятия заявки менеджером"""
     try:
-        request_id = int(callback.data.split(":")[1])
-        logging.info(f"🔔 Обработка принятия заявки #{request_id}")
+        _, request_id_str = callback.data.split(":")
+        request_id = int(request_id_str)
         
-        # Используем функцию из chat_handlers
-        from app.handlers.chat_handlers import accept_request
-        await accept_request(callback, request_id)
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Request).where(Request.id == request_id)
+            )
+            request = result.scalar_one_or_none()
+            
+            if not request:
+                await callback.answer("Заявка не найдена", show_alert=True)
+                return
+            
+            request.status = "accepted"
+            await session.commit()
+        
+        await callback.answer("Заявка принята")
         
     except Exception as e:
-        logging.error(f"❌ Ошибка в process_manager_accept: {e}")
-        await callback.answer("❌ Ошибка при обработке")
+        logging.error(f"❌ Ошибка при принятии заявки: {e}")
+        await callback.answer("Не удалось принять заявку", show_alert=True)
 
 
 async def process_manager_reject(callback: CallbackQuery, state: FSMContext):
-    """Обработка отклонения заявки из группы"""
+    """Обработка отклонения заявки менеджером"""
     try:
-        request_id = int(callback.data.split(":")[1])
-        logging.info(f"🔔 Обработка отклонения заявки #{request_id}")
+        _, request_id_str = callback.data.split(":")
+        request_id = int(request_id_str)
         
-        # Используем функцию из chat_handlers
-        from app.handlers.chat_handlers import reject_request
-        await reject_request(callback, request_id)
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Request).where(Request.id == request_id)
+            )
+            request = result.scalar_one_or_none()
+            
+            if not request:
+                await callback.answer("Заявка не найдена", show_alert=True)
+                return
+            
+            request.status = "rejected"
+            await session.commit()
+        
+        await callback.answer("Заявка отклонена")
         
     except Exception as e:
-        logging.error(f"❌ Ошибка в process_manager_reject: {e}")
-        await callback.answer("❌ Ошибка при обработке")
+        logging.error(f"❌ Ошибка при отклонении заявки: {e}")
+        await callback.answer("Не удалось отклонить заявку", show_alert=True)
 
 
-async def process_manager_call(callback: CallbackQuery, request_id: int):
-    """Обработка кнопки звонка из группы"""
-    async with AsyncSessionLocal() as session:
-        try:
-            # Получаем данные заявки и пользователя
-            request_result = await session.execute(
+async def process_manager_comment(callback: CallbackQuery, state: FSMContext):
+    """Обработка комментария менеджера к заявке"""
+    try:
+        _, request_id_str = callback.data.split(":")
+        request_id = int(request_id_str)
+        
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
                 select(Request, User)
                 .join(User, Request.user_id == User.id)
                 .where(Request.id == request_id)
             )
-            result = request_result.first()
-            
-            if not result:
+            row = result.first()
+            if not row:
                 await callback.answer("Заявка не найдена", show_alert=True)
                 return
             
-            request, user = result
-            phone = user.phone_number or "не указан"
+            request, user = row
             
-            text = (
-                f"📞 Контакт по заявке #{request.id}\n\n"
-                f"👤 Клиент: {user.full_name}\n"
-                f"📱 Телефон: {phone}"
-            )
-            await callback.answer()
-            await callback.message.reply(text)
-            
-        except Exception as e:
-            logging.error(f"❌ Ошибка в process_manager_call: {e}")
-            await callback.answer("❌ Ошибка при обработке", show_alert=True)
+            # Здесь можно реализовать логику запроса комментария от менеджера
+            await callback.answer("Функция комментариев пока не реализована", show_alert=True)
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка при обработке комментария: {e}")
+        await callback.answer("Не удалось обработать комментарий", show_alert=True)
