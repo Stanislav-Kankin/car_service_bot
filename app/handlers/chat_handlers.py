@@ -22,7 +22,6 @@ PENDING_ACTIONS: Dict[int, str] = {}
 PROMPT_MESSAGES: Dict[int, int] = {}
 
 
-
 async def _load_request_with_user(
     session, request_id: int
 ) -> Optional[Tuple[Request, User]]:

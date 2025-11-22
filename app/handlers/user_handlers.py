@@ -20,7 +20,8 @@ from app.keyboards.main_kb import (
     get_electric_subtypes_kb, get_aggregates_subtypes_kb,
     get_photo_skip_kb, get_request_confirm_kb,
     get_delete_confirm_kb, get_history_kb, get_edit_cancel_kb,
-    get_can_drive_kb, get_location_reply_kb, get_role_kb
+    get_can_drive_kb, get_location_reply_kb, get_role_kb,
+    get_manager_main_kb
 )
 from app.config import config
 
@@ -66,37 +67,53 @@ router = Router()
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    
+
     logging.info(f"🔄 Обработка /start для пользователя {message.from_user.id}")
-    
+
     async with AsyncSessionLocal() as session:
         try:
             result = await session.execute(
                 select(User).where(User.telegram_id == message.from_user.id)
             )
             user = result.scalar_one_or_none()
-            
+
+            # Пользователь уже есть в БД
             if user:
-                logging.info(f"✅ Пользователь {message.from_user.id} уже зарегистрирован")
-                await message.answer(
-                    "👋 С возвращением в CAR SERVICE BOT!\n\n"
-                    "Выберите действие:",
-                    reply_markup=get_main_kb()
-                )
-            else:
-                logging.info(f"🆕 Новый пользователь {message.from_user.id}")
-                await message.answer(
-                    "👋 Добро пожаловать в CAR SERVICE BOT!\n\n"
-                    "Я помогу вам с обслуживанием вашего автомобиля: "
-                    "запись на сервис, шиномонтаж, эвакуатор и многое другое.\n\n"
-                    "Для начала работы нужно пройти простую регистрацию:",
-                    reply_markup=get_registration_kb()
-                )
+                if user.role == "service":
+                    logging.info(
+                        f"✅ Пользователь {message.from_user.id} уже зарегистрирован как автосервис"
+                    )
+                    await message.answer(
+                        "🛠 Вы уже зарегистрированы как автосервис.\n"
+                        "Используйте панель ниже или команду /manager для работы с заявками.",
+                        reply_markup=get_manager_main_kb(),
+                    )
+                else:
+                    logging.info(
+                        f"✅ Пользователь {message.from_user.id} уже зарегистрирован как клиент"
+                    )
+                    await message.answer(
+                        "🏠 Вы уже зарегистрированы. Главное меню:",
+                        reply_markup=get_main_kb(),
+                    )
+                return
+
+            # Пользователя нет — новая регистрация
+            logging.info(f"🆕 Новый пользователь {message.from_user.id}")
+            await message.answer(
+                "👋 Добро пожаловать в CAR SERVICE BOT!\n\n"
+                "Я помогу вам с обслуживанием вашего автомобиля: "
+                "запись на сервис, шиномонтаж, эвакуатор и многое другое.\n\n"
+                "Для начала работы нужно пройти простую регистрацию:",
+                reply_markup=get_registration_kb(),
+            )
+
         except Exception as e:
             logging.error(f"❌ Ошибка при обработке /start: {e}")
             await message.answer(
                 "❌ Произошла ошибка при запуске. Попробуйте позже."
             )
+
 
 
 # Обработчик кнопки "Назад в меню"
@@ -308,73 +325,39 @@ async def process_phone_registration(message: Message, state: FSMContext):
             await state.clear()
             return
 
-    await state.clear()
+        await state.clear()
 
+    # Сообщение об успешной регистрации
     await message.answer(
         "✅ Регистрация завершена!\n\n"
         "Теперь вы можете работать с ботом.",
         reply_markup=ReplyKeyboardRemove(),
     )
 
-    await message.answer(
-        "🏠 Главное меню:",
-        reply_markup=get_main_kb(),
-    )
+    # Разное меню для клиента и автосервиса
+    if role == "service":
+        await message.answer(
+            "🛠 Вы зарегистрированы как <b>автосервис</b>.\n\n"
+            "Новые заявки будут приходить в чат менеджеров.\n"
+            "Для работы с ними используйте панель ниже или команду /manager.",
+            parse_mode="HTML",
+            reply_markup=get_manager_main_kb(),
+        )
+    else:
+        await message.answer(
+            "🏠 Главное меню:",
+            reply_markup=get_main_kb(),
+        )
 
-    phone_number = message.contact.phone_number
-    data = await state.get_data()
-    name = data.get("user_name") or message.from_user.full_name
-
-    async with AsyncSessionLocal() as session:
-        try:
-            # Проверяем, нет ли уже пользователя
-            result = await session.execute(
-                select(User).where(User.telegram_id == message.from_user.id)
-            )
-            user = result.scalar_one_or_none()
-            
-            if user:
-                # Обновляем данные
-                user.full_name = name
-                user.phone_number = phone_number
-                await session.commit()
-                logging.info(f"🔄 Обновлена регистрация пользователя {message.from_user.id}")
-            else:
-                # Создаем нового пользователя
-                new_user = User(
-                    telegram_id=message.from_user.id,
-                    full_name=name,
-                    phone_number=phone_number
-                )
-                session.add(new_user)
-                await session.commit()
-                logging.info(f"✅ Зарегистрирован новый пользователь {message.from_user.id}")
-
-                # ✅ Начисляем приветственный бонус (только при первой регистрации)
-                try:
-                    await add_bonus(message.from_user.id, "register", description="Регистрация в боте")
-                except Exception as bonus_err:
-                    logging.error(f"❌ Ошибка начисления бонуса за регистрацию: {bonus_err}")
-        except Exception as e:
-            await session.rollback()
-            logging.error(f"❌ Ошибка при сохранении регистрации: {e}")
-            await message.answer(
-                "❌ Произошла ошибка при сохранении данных. Попробуйте позже."
-            )
-            return
-
-    await state.clear()
-
-    await message.answer(
-        "✅ Регистрация завершена!\n\n"
-        "Теперь вы можете управлять своими автомобилями и создавать заявки на услуги.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-
-    await message.answer(
-        "🏠 Главное меню:",
-        reply_markup=get_main_kb()
-    )
+    # Бонус за регистрацию — только для новой записи
+    try:
+        await add_bonus(
+            message.from_user.id,
+            "register",
+            description="Регистрация в боте",
+        )
+    except Exception as bonus_err:
+        logging.error(f"❌ Ошибка начисления бонуса за регистрацию: {bonus_err}")
 
 
 # Обработчик нажатия на "Мой гараж"
@@ -481,6 +464,14 @@ async def my_garage(callback: CallbackQuery, state: FSMContext):
         pass
 
 
+# Регистрация обработчика нажатия на кнопку "Мой гараж"
+@router.callback_query(F.data == "my_garage")
+async def my_garage_callback(callback: CallbackQuery, state: FSMContext):
+    """
+    Входная точка для callback-кнопки "Мой гараж".
+    Просто прокидываем вызов в общий обработчик my_garage().
+    """
+    await my_garage(callback, state)
 
 
 # Обработчик кнопки "Добавить автомобиль"

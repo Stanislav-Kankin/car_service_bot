@@ -2,7 +2,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     KeyboardButton
 )
-from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder, InlineKeyboardMarkup
 
 
 # Главное меню (инлайн)
@@ -250,27 +250,20 @@ def get_edit_cancel_kb():
 
 
 # ==============================
-# Панель менеджера (инлайн)
+# Клавиатура панель менеджера
 # ==============================
-
-def get_manager_main_kb():
+def get_manager_main_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="📥 Новые заявки", callback_data="manager_new_requests"),
-        InlineKeyboardButton(
-            text="🔄 В обработке", callback_data="manager_in_progress")
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text="📅 Записи", callback_data="manager_scheduled"),
-        InlineKeyboardButton(
-            text="📁 Архив", callback_data="manager_archive")
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text="⚙️ Настройки", callback_data="manager_settings")
-    )
+    # Основные разделы
+    builder.button(text="📥 Новые заявки", callback_data="manager_new_requests")
+    builder.button(text="🔄 В обработке", callback_data="manager_in_progress")
+    builder.button(text="📅 Записи", callback_data="manager_scheduled")
+    builder.button(text="📁 Архив", callback_data="manager_archive")
+    # Поиск
+    builder.button(text="🔍 Поиск заявки", callback_data="manager_search")
+    # Настройки
+    builder.button(text="⚙️ Настройки", callback_data="manager_settings")
+    builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
 
 
