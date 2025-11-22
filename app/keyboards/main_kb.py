@@ -20,12 +20,12 @@ def get_main_kb():
         InlineKeyboardButton(
             text="ℹ️ Помощь", callback_data="help")
     )
-    # ✅ Новая кнопка бонусов
+    # 🔹 Новая строка: список автосервисов + бонусы
     builder.row(
         InlineKeyboardButton(
-            text="🎁 Мои бонусы", callback_data="my_points"),
-
-        InlineKeyboardButton(text="🛠 Автосервисы")
+            text="🏭 Автосервисы", callback_data="service_centers_list"),
+        InlineKeyboardButton(
+            text="🎁 Мои бонусы", callback_data="my_points")
     )
     return builder.as_markup()
 
@@ -278,7 +278,6 @@ def get_manager_panel_kb():
     return get_manager_main_kb()
 
 
-
 # Клавиатура управления конкретной заявкой для менеджера
 def get_manager_request_kb(request_id: int):
     builder = InlineKeyboardBuilder()
@@ -298,7 +297,7 @@ def get_manager_request_kb(request_id: int):
 # Клавиатура смены статуса заявки для менеджера
 def get_manager_status_kb(request_id: int, current_status: str):
     builder = InlineKeyboardBuilder()
-    
+
     if current_status == "new":
         builder.row(
             InlineKeyboardButton(
@@ -332,33 +331,35 @@ def get_manager_status_kb(request_id: int, current_status: str):
             InlineKeyboardButton(
                 text="📁 В архив", callback_data=f"manager_set_status:{request_id}:archived")
         )
-    
+
     builder.row(
         InlineKeyboardButton(
             text="⬅️ Назад", callback_data=f"manager_view_request:{request_id}")
     )
-    
+
     return builder.as_markup()
 
 
 # Клавиатура списка заявок для менеджера (пагинация)
 def get_manager_requests_list_kb(requests_ids, current_index: int):
     builder = InlineKeyboardBuilder()
-    
+
     if current_index > 0:
         builder.row(
-            InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"manager_view_request:{requests_ids[current_index - 1]}")
+            InlineKeyboardButton(text="⬅️ Предыдущая",
+                                 callback_data=f"manager_view_request:{requests_ids[current_index - 1]}")
         )
-    
+
     builder.row(
         InlineKeyboardButton(text="📋 К списку", callback_data="manager_all_requests")
     )
-    
+
     if current_index < len(requests_ids) - 1:
         builder.row(
-            InlineKeyboardButton(text="Следующая ➡️", callback_data=f"manager_view_request:{requests_ids[current_index + 1]}")
+            InlineKeyboardButton(text="Следующая ➡️",
+                                 callback_data=f"manager_view_request:{requests_ids[current_index + 1]}")
         )
-    
+
     return builder.as_markup()
 
 
@@ -435,10 +436,13 @@ def get_role_kb():
     return builder.as_markup()
 
 
-
 def get_service_notifications_kb():
     """
-    Куда отдавать заявки автосервису.
+    Куда отдавать заявки автосервису при регистрации.
+
+    На данный момент поддерживаем ОДИН вариант:
+    - только в ЛС владельцу
+    - только в группу
     """
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -453,11 +457,4 @@ def get_service_notifications_kb():
             callback_data="sc_notif_group",
         )
     )
-    builder.row(
-        InlineKeyboardButton(
-            text="📬 И в ЛС, и в группу",
-            callback_data="sc_notif_both",
-        )
-    )
     return builder.as_markup()
-

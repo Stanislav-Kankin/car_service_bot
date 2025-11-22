@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app.config import config
 from app.database.db import AsyncSessionLocal
-from app.database.models import Request, User, Car
+from app.database.models import Request, User, Car, ServiceCenter
 
 
 def _format_status(status: Optional[str]) -> str:
@@ -128,7 +128,12 @@ def _build_chat_keyboard(request: Request) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def _format_request_text(request: Request, user: User, car: Optional[Car]) -> str:
+def _format_request_text(
+    request: Request,
+    user: User,
+    car: Optional[Car],
+    service_center: Optional[ServiceCenter] = None,
+) -> str:
     car_block = "🚗 Автомобиль: не указан"
 
     if car:
@@ -164,6 +169,13 @@ def _format_request_text(request: Request, user: User, car: Optional[Car]) -> st
     else:
         location_text = "📍 Местоположение: не указано"
 
+    service_block = ""
+    if service_center:
+        service_block = (
+            f"\n🏭 Автосервис: {service_center.name}\n"
+            f"📍 Адрес сервиса: {service_center.address or '—'}"
+        )
+
     text = (
         f"📋 Заявка #{request.id}\n\n"
         f"👤 Клиент: {user.full_name or 'Не указано'}\n"
@@ -175,7 +187,8 @@ def _format_request_text(request: Request, user: User, car: Optional[Car]) -> st
         f"🚚 Может ехать сам: {drive_text}\n"
         f"{location_text}\n\n"
         f"📊 Статус: {_format_status(request.status)}\n"
-        f"⏰ Создана: {created_at}\n\n"
+        f"⏰ Создана: {created_at}"
+        f"{service_block}\n\n"
         "ℹ️ Чтобы ответить по заявке, нажмите нужную кнопку ниже.\n"
         "Если нужно просто оставить комментарий, ответьте на это сообщение (Reply)."
     )
@@ -188,16 +201,30 @@ def _format_request_text(request: Request, user: User, car: Optional[Car]) -> st
 
 async def create_request_chat(bot: Bot, request_id: int) -> None:
     """
-    Создать/отправить сообщение о заявке в группу менеджеров.
+    Создать/отправить сообщение о заявке в группу/ЛС автосервиса.
 
-    Используется при создании новой заявки клиентом.
+    Логика:
+    - Берём заявку, пользователя, авто и сервис.
+    - Определяем, куда слать:
+        • если у заявки есть service_center:
+            - если send_to_group и manager_chat_id → туда
+            - если send_to_owner → в ЛС владельцу
+            - если оба → основной канал = группа, вторичный = ЛС
+        • иначе — fallback на глобальный MANAGER_CHAT_ID (обратная совместимость)
+    - В основной канал сохраняем message_id в request.chat_message_id
+      (для update_chat_keyboard).
     """
     async with AsyncSessionLocal() as session:
         try:
             result = await session.execute(
-                select(Request, User, Car)
+                select(Request, User, Car, ServiceCenter)
                 .join(User, Request.user_id == User.id)
                 .join(Car, Request.car_id == Car.id, isouter=True)
+                .join(
+                    ServiceCenter,
+                    Request.service_center_id == ServiceCenter.id,
+                    isouter=True,
+                )
                 .where(Request.id == request_id)
             )
             row = result.first()
@@ -206,60 +233,98 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
                 logging.error(f"❌ create_request_chat: заявка #{request_id} не найдена")
                 return
 
-            request, user, car = row
+            request, user, car, service_center = row
 
-            if not config.MANAGER_CHAT_ID:
-                logging.error("❌ MANAGER_CHAT_ID не задан в конфиге/ENV")
-                return
+            primary_chat_id: Optional[int] = None
+            extra_chat_ids: list[int] = []
 
-            try:
-                chat_id = int(config.MANAGER_CHAT_ID)
-            except ValueError:
-                logging.error(
-                    f"❌ Некорректный MANAGER_CHAT_ID: {config.MANAGER_CHAT_ID}"
+            # Определяем основной и дополнительные каналы для сервиса
+            owner_telegram_id: Optional[int] = None
+            if service_center and service_center.owner_user_id:
+                owner_res = await session.execute(
+                    select(User).where(User.id == service_center.owner_user_id)
                 )
-                return
+                owner = owner_res.scalar_one_or_none()
+                if owner and owner.telegram_id:
+                    owner_telegram_id = owner.telegram_id
 
-            text = _format_request_text(request, user, car)
+            if service_center:
+                # приоритет: группа → ЛС
+                if service_center.send_to_group and service_center.manager_chat_id:
+                    primary_chat_id = service_center.manager_chat_id
+
+                if service_center.send_to_owner and owner_telegram_id:
+                    if primary_chat_id is None:
+                        primary_chat_id = owner_telegram_id
+                    else:
+                        extra_chat_ids.append(owner_telegram_id)
+
+            # Fallback на глобальный MANAGER_CHAT_ID
+            if primary_chat_id is None:
+                if not config.MANAGER_CHAT_ID:
+                    logging.error("❌ MANAGER_CHAT_ID не задан и нет service_center для заявки")
+                    return
+                try:
+                    primary_chat_id = int(config.MANAGER_CHAT_ID)
+                except ValueError:
+                    logging.error(
+                        f"❌ Некорректный MANAGER_CHAT_ID: {config.MANAGER_CHAT_ID}"
+                    )
+                    return
+
+            text = _format_request_text(request, user, car, service_center)
             keyboard = _build_chat_keyboard(request)
 
-            message = None
+            async def _send_to_chat(chat_id: int) -> Optional[int]:
+                msg = None
+                file_id = None
+                if request.photo_file_id:
+                    file_id = request.photo_file_id.split(",")[0].strip() or None
 
-            # Берём первое фото, если есть
-            file_id = None
-            if request.photo_file_id:
-                # На будущее оставляю split, вдруг позже решим хранить несколько
-                file_id = request.photo_file_id.split(",")[0].strip() or None
+                if file_id:
+                    try:
+                        msg = await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=file_id,
+                            caption=text,
+                            reply_markup=keyboard,
+                            parse_mode="HTML",
+                        )
+                    except Exception as e:
+                        logging.error(
+                            f"❌ Ошибка отправки фото в чат {chat_id} для заявки #{request_id}: {e}"
+                        )
 
-            if file_id:
-                try:
-                    message = await bot.send_photo(
+                if msg is None:
+                    msg = await bot.send_message(
                         chat_id=chat_id,
-                        photo=file_id,
-                        caption=text,
+                        text=text,
                         reply_markup=keyboard,
                         parse_mode="HTML",
                     )
-                except Exception as e:
-                    logging.error(
-                        f"❌ Ошибка отправки фото в чат менеджеров для заявки #{request_id}: {e}"
-                    )
+                return msg.message_id
 
-            if message is None:
-                message = await bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
+            # Отправляем в основной канал
+            primary_msg_id = await _send_to_chat(primary_chat_id)
+            if primary_msg_id:
+                request.chat_message_id = primary_msg_id
+                await session.commit()
+                logging.info(
+                    f"✅ Чат для заявки #{request_id} создан и сообщение отправлено "
+                    f"(chat_id={primary_chat_id}, msg_id={primary_msg_id})"
                 )
 
-            # Сохраняем ID сообщения чата, чтобы потом обновлять клавиатуру
-            request.chat_message_id = message.message_id
-            await session.commit()
-            logging.info(
-                f"✅ Чат для заявки #{request_id} создан и сообщение отправлено "
-                f"(msg_id={message.message_id})"
-            )
+            # Дополнительно — дублируем в остальные каналы (без сохранения message_id)
+            for chat_id in extra_chat_ids:
+                try:
+                    await _send_to_chat(chat_id)
+                    logging.info(
+                        f"ℹ️ Дополнительно отправлена копия заявки #{request_id} в чат {chat_id}"
+                    )
+                except Exception as e:
+                    logging.error(
+                        f"❌ Не удалось отправить копию заявки #{request_id} в чат {chat_id}: {e}"
+                    )
 
         except Exception as e:
             await session.rollback()
@@ -268,21 +333,34 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
 
 async def update_chat_keyboard(bot: Bot, request_id: int) -> None:
     """
-    Обновить inline-клавиатуру под сообщением заявки в группе менеджеров.
+    Обновить inline-клавиатуру под сообщением заявки в чате сервиса.
     Используется после изменения статуса/данных заявки.
+
+    Логика выбора чата такая же, как в create_request_chat:
+    - если есть service_center:
+        • если send_to_group и manager_chat_id → туда
+        • иначе, если send_to_owner → ЛС владельца
+    - иначе — fallback на MANAGER_CHAT_ID
     """
     async with AsyncSessionLocal() as session:
         try:
             result = await session.execute(
-                select(Request).where(Request.id == request_id)
+                select(Request, ServiceCenter)
+                .join(
+                    ServiceCenter,
+                    Request.service_center_id == ServiceCenter.id,
+                    isouter=True,
+                )
+                .where(Request.id == request_id)
             )
-            request = result.scalar_one_or_none()
-
-            if not request:
+            row = result.first()
+            if not row:
                 logging.error(
                     f"❌ update_chat_keyboard: заявка #{request_id} не найдена"
                 )
                 return
+
+            request, service_center = row
 
             if not request.chat_message_id:
                 logging.warning(
@@ -290,28 +368,45 @@ async def update_chat_keyboard(bot: Bot, request_id: int) -> None:
                 )
                 return
 
-            if not config.MANAGER_CHAT_ID:
-                logging.error("❌ MANAGER_CHAT_ID не задан в конфиге/ENV")
-                return
+            primary_chat_id: Optional[int] = None
 
-            try:
-                chat_id = int(config.MANAGER_CHAT_ID)
-            except ValueError:
-                logging.error(
-                    f"❌ Некорректный MANAGER_CHAT_ID: {config.MANAGER_CHAT_ID}"
+            owner_telegram_id: Optional[int] = None
+            if service_center and service_center.owner_user_id:
+                owner_res = await session.execute(
+                    select(User).where(User.id == service_center.owner_user_id)
                 )
-                return
+                owner = owner_res.scalar_one_or_none()
+                if owner and owner.telegram_id:
+                    owner_telegram_id = owner.telegram_id
+
+            if service_center:
+                if service_center.send_to_group and service_center.manager_chat_id:
+                    primary_chat_id = service_center.manager_chat_id
+                elif service_center.send_to_owner and owner_telegram_id:
+                    primary_chat_id = owner_telegram_id
+
+            if primary_chat_id is None:
+                if not config.MANAGER_CHAT_ID:
+                    logging.error("❌ MANAGER_CHAT_ID не задан и не удалось определить чат сервиса")
+                    return
+                try:
+                    primary_chat_id = int(config.MANAGER_CHAT_ID)
+                except ValueError:
+                    logging.error(
+                        f"❌ Некорректный MANAGER_CHAT_ID: {config.MANAGER_CHAT_ID}"
+                    )
+                    return
 
             keyboard = _build_chat_keyboard(request)
 
             try:
                 await bot.edit_message_reply_markup(
-                    chat_id=chat_id,
+                    chat_id=primary_chat_id,
                     message_id=request.chat_message_id,
                     reply_markup=keyboard,
                 )
                 logging.info(
-                    f"🔧 update_chat_keyboard #{request_id}, status={request.status}"
+                    f"🔧 update_chat_keyboard #{request_id}, status={request.status}, chat_id={primary_chat_id}"
                 )
             except Exception as e:
                 if "message is not modified" in str(e):
