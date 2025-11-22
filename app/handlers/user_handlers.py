@@ -10,7 +10,7 @@ import logging
 
 from app.services.notification_service import notify_manager_about_new_request
 from app.services.bonus_service import add_bonus, get_user_balance
-from app.database.models import User, Car, Request
+from app.database.models import User, Car, Request, ServiceCenter
 from app.database.db import AsyncSessionLocal
 from app.keyboards.main_kb import (
     get_main_kb, get_registration_kb,
@@ -21,7 +21,7 @@ from app.keyboards.main_kb import (
     get_photo_skip_kb, get_request_confirm_kb,
     get_delete_confirm_kb, get_history_kb, get_edit_cancel_kb,
     get_can_drive_kb, get_location_reply_kb, get_role_kb,
-    get_manager_main_kb
+    get_manager_main_kb, get_service_notifications_kb
 )
 from app.config import config
 
@@ -59,6 +59,8 @@ class Registration(StatesGroup):
     service_name = State()
     service_address = State()
     phone = State()
+    notifications = State()
+    group_chat = State()
 
 
 router = Router()
@@ -113,7 +115,6 @@ async def cmd_start(message: Message, state: FSMContext):
             await message.answer(
                 "❌ Произошла ошибка при запуске. Попробуйте позже."
             )
-
 
 
 # Обработчик кнопки "Назад в меню"
@@ -282,12 +283,14 @@ async def process_phone_registration(message: Message, state: FSMContext):
 
     async with AsyncSessionLocal() as session:
         try:
+            # Ищем пользователя по telegram_id
             result = await session.execute(
                 select(User).where(User.telegram_id == message.from_user.id)
             )
             user = result.scalar_one_or_none()
 
             if user:
+                # Обновляем существующего
                 user.full_name = name
                 user.phone_number = phone_number
                 user.role = role
@@ -295,13 +298,9 @@ async def process_phone_registration(message: Message, state: FSMContext):
                 if role == "service":
                     user.service_name = service_name
                     user.service_address = service_address
-
-                await session.commit()
-                logging.info(
-                    f"🔄 Обновлена регистрация пользователя {message.from_user.id} (role={role})"
-                )
             else:
-                new_user = User(
+                # Создаём нового
+                user = User(
                     telegram_id=message.from_user.id,
                     full_name=name,
                     phone_number=phone_number,
@@ -309,10 +308,43 @@ async def process_phone_registration(message: Message, state: FSMContext):
                     service_name=service_name if role == "service" else None,
                     service_address=service_address if role == "service" else None,
                 )
-                session.add(new_user)
-                await session.commit()
+                session.add(user)
+
+            await session.commit()
+            await session.refresh(user)
+
+            # 🔗 Если это автосервис — создаём (или находим) ServiceCenter
+            service_center_id: int | None = None
+            if role == "service":
+                sc_result = await session.execute(
+                    select(ServiceCenter).where(ServiceCenter.owner_user_id == user.id)
+                )
+                service_center = sc_result.scalar_one_or_none()
+
+                if not service_center:
+                    service_center = ServiceCenter(
+                        name=user.service_name or user.full_name,
+                        address=user.service_address,
+                        phone=user.phone_number,
+                        owner_user_id=user.id,
+                        # По умолчанию пока просто ЛС, далее настроим
+                        send_to_owner=True,
+                        send_to_group=False,
+                        manager_chat_id=None,
+                    )
+                    session.add(service_center)
+                    await session.commit()
+                    await session.refresh(service_center)
+
+                service_center_id = service_center.id
+
                 logging.info(
-                    f"✅ Зарегистрирован новый пользователь {message.from_user.id} (role={role})"
+                    f"✅ Зарегистрирован/обновлён автосервис для пользователя {message.from_user.id} "
+                    f"(ServiceCenter id={service_center.id})"
+                )
+            else:
+                logging.info(
+                    f"🔄 Обновлена регистрация пользователя {message.from_user.id} (role={role})"
                 )
 
         except Exception as e:
@@ -325,39 +357,54 @@ async def process_phone_registration(message: Message, state: FSMContext):
             await state.clear()
             return
 
+    # ✅ Клиент: сразу завершаем регистрацию
+    if role != "service":
         await state.clear()
 
-    # Сообщение об успешной регистрации
-    await message.answer(
-        "✅ Регистрация завершена!\n\n"
-        "Теперь вы можете работать с ботом.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-
-    # Разное меню для клиента и автосервиса
-    if role == "service":
         await message.answer(
-            "🛠 Вы зарегистрированы как <b>автосервис</b>.\n\n"
-            "Новые заявки будут приходить в чат менеджеров.\n"
-            "Для работы с ними используйте панель ниже или команду /manager.",
-            parse_mode="HTML",
-            reply_markup=get_manager_main_kb(),
+            "✅ Регистрация завершена!\n\n"
+            "Теперь вы можете работать с ботом.",
+            reply_markup=ReplyKeyboardRemove(),
         )
-    else:
         await message.answer(
             "🏠 Главное меню:",
             reply_markup=get_main_kb(),
         )
 
-    # Бонус за регистрацию — только для новой записи
-    try:
-        await add_bonus(
-            message.from_user.id,
-            "register",
-            description="Регистрация в боте",
+        # Бонус за регистрацию
+        try:
+            await add_bonus(
+                message.from_user.id,
+                "register",
+                description="Регистрация в боте",
+            )
+        except Exception as bonus_err:
+            logging.error(f"❌ Ошибка начисления бонуса за регистрацию: {bonus_err}")
+
+        return
+
+    # 🛠 Автосервис: идём на шаг выбора, куда слать заявки
+    if not service_center_id:
+        # На всякий случай, если что-то пошло не так
+        await state.clear()
+        await message.answer(
+            "❌ Не удалось создать профиль автосервиса. Попробуйте /start ещё раз.",
+            reply_markup=ReplyKeyboardRemove(),
         )
-    except Exception as bonus_err:
-        logging.error(f"❌ Ошибка начисления бонуса за регистрацию: {bonus_err}")
+        return
+
+    await state.update_data(service_center_id=service_center_id)
+
+    await message.answer(
+        "✅ Основные данные автосервиса сохранены.\n\n"
+        "Теперь выберите, куда вы хотите получать новые заявки:",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await message.answer(
+        "Куда слать заявки от клиентов?",
+        reply_markup=get_service_notifications_kb(),
+    )
+    await state.set_state(Registration.notifications)
 
 
 # Обработчик нажатия на "Мой гараж"
@@ -462,6 +509,179 @@ async def my_garage(callback: CallbackQuery, state: FSMContext):
     except Exception:
         # На всякий случай вообще не падаем из-за answer()
         pass
+
+
+@router.callback_query(
+    Registration.notifications,
+    F.data.in_(["sc_notif_owner", "sc_notif_group", "sc_notif_both"]),
+)
+async def registration_choose_notifications(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    service_center_id = data.get("service_center_id")
+
+    if not service_center_id:
+        await state.clear()
+        await callback.message.edit_text(
+            "❌ Не найден профиль автосервиса. Попробуйте /start ещё раз."
+        )
+        await callback.answer()
+        return
+
+    async with AsyncSessionLocal() as session:
+        from app.database.models import ServiceCenter  # на случай локального импорта
+
+        result = await session.execute(
+            select(ServiceCenter).where(ServiceCenter.id == service_center_id)
+        )
+        service_center = result.scalar_one_or_none()
+
+        if not service_center:
+            await state.clear()
+            await callback.message.edit_text(
+                "❌ Профиль автосервиса не найден. Попробуйте /start ещё раз."
+            )
+            await callback.answer()
+            return
+
+        # Ветвление по варианту
+        choice = callback.data
+
+        if choice == "sc_notif_owner":
+            service_center.send_to_owner = True
+            service_center.send_to_group = False
+            service_center.manager_chat_id = None
+
+            await session.commit()
+            await state.clear()
+
+            await callback.message.edit_text(
+                "✅ Заявки будут приходить вам в личные сообщения этого аккаунта.\n\n"
+                "Регистрация завершена!",
+            )
+            await callback.message.answer(
+                "🛠 Вы зарегистрированы как <b>автосервис</b>.\n\n"
+                "Новые заявки будут приходить вам в этот бот.\n"
+                "Позже вы сможете настроить получение заявок в отдельную группу.",
+                parse_mode="HTML",
+                reply_markup=get_manager_main_kb(),
+            )
+
+            # Бонус за регистрацию
+            try:
+                await add_bonus(
+                    callback.from_user.id,
+                    "register",
+                    description="Регистрация автосервиса в боте",
+                )
+            except Exception as bonus_err:
+                logging.error(f"❌ Ошибка начисления бонуса за регистрацию (service): {bonus_err}")
+
+            await callback.answer()
+            return
+
+        # Если нужна группа (с ЛС или без) — идём на шаг привязки группы
+        send_to_owner = choice == "sc_notif_both"
+        service_center.send_to_owner = send_to_owner
+        service_center.send_to_group = True
+        # manager_chat_id пока не знаем
+        await session.commit()
+
+    # Запоминаем, нужно ли слать ещё и в ЛС
+    await state.update_data(send_to_owner_also=send_to_owner)
+    await state.set_state(Registration.group_chat)
+
+    await callback.message.edit_text(
+        "👥 Отлично! Теперь нужно привязать группу Telegram для получения заявок.\n\n"
+        "1️⃣ Добавьте этого бота в вашу группу и назначьте его администратором.\n"
+        "2️⃣ Перешлите сюда <b>любое</b> сообщение из этой группы.\n\n"
+        "После этого все новые заявки будут отправляться в указанную группу.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(Registration.group_chat)
+async def registration_bind_group_chat(message: Message, state: FSMContext):
+    data = await state.get_data()
+    service_center_id = data.get("service_center_id")
+    send_to_owner_also = data.get("send_to_owner_also", False)
+
+    if not service_center_id:
+        await state.clear()
+        await message.answer(
+            "❌ Не найден профиль автосервиса. Попробуйте /start ещё раз.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    fwd_chat = message.forward_from_chat
+    if not fwd_chat:
+        await message.answer(
+            "❌ Не удалось определить группу.\n\n"
+            "Пожалуйста, перешлите <b>сообщение из группы</b>, "
+            "куда нужно отправлять заявки.",
+            parse_mode="HTML",
+        )
+        return
+
+    if fwd_chat.type not in ("group", "supergroup"):
+        await message.answer(
+            "❌ Это не группа.\n\n"
+            "Перешлите сообщение именно из <b>группы или супергруппы</b>, "
+            "куда вы хотите получать заявки.",
+            parse_mode="HTML",
+        )
+        return
+
+    group_chat_id = fwd_chat.id
+
+    async with AsyncSessionLocal() as session:
+        from app.database.models import ServiceCenter  # на случай локального импорта
+
+        result = await session.execute(
+            select(ServiceCenter).where(ServiceCenter.id == service_center_id)
+        )
+        service_center = result.scalar_one_or_none()
+
+        if not service_center:
+            await state.clear()
+            await message.answer(
+                "❌ Профиль автосервиса не найден. Попробуйте /start ещё раз.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
+
+        service_center.manager_chat_id = group_chat_id
+        service_center.send_to_group = True
+        service_center.send_to_owner = bool(send_to_owner_also)
+
+        await session.commit()
+
+    await state.clear()
+
+    await message.answer(
+        "✅ Группа успешно привязана!\n\n"
+        "Теперь новые заявки будут отправляться в указанную группу"
+        + (" и вам в личные сообщения." if send_to_owner_also else "."),
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+    await message.answer(
+        "🛠 Вы зарегистрированы как <b>автосервис</b>.\n\n"
+        "Используйте панель ниже или команду /manager для работы с заявками.",
+        parse_mode="HTML",
+        reply_markup=get_manager_main_kb(),
+    )
+
+    # Бонус за регистрацию
+    try:
+        await add_bonus(
+            message.from_user.id,
+            "register",
+            description="Регистрация автосервиса в боте (с привязкой группы)",
+        )
+    except Exception as bonus_err:
+        logging.error(f"❌ Ошибка начисления бонуса за регистрацию (service+group): {bonus_err}")
 
 
 # Регистрация обработчика нажатия на кнопку "Мой гараж"

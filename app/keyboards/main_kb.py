@@ -23,7 +23,9 @@ def get_main_kb():
     # ✅ Новая кнопка бонусов
     builder.row(
         InlineKeyboardButton(
-            text="🎁 Мои бонусы", callback_data="my_points")
+            text="🎁 Мои бонусы", callback_data="my_points"),
+
+        InlineKeyboardButton(text="🛠 Автосервисы")
     )
     return builder.as_markup()
 
@@ -431,3 +433,31 @@ def get_role_kb():
         )
     )
     return builder.as_markup()
+
+
+
+def get_service_notifications_kb():
+    """
+    Куда отдавать заявки автосервису.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="📩 В личные сообщения",
+            callback_data="sc_notif_owner",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="👥 В группу Telegram",
+            callback_data="sc_notif_group",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="📬 И в ЛС, и в группу",
+            callback_data="sc_notif_both",
+        )
+    )
+    return builder.as_markup()
+
