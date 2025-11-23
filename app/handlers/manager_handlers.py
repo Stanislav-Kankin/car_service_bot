@@ -7,20 +7,19 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sqlalchemy import select, func
 
 from app.config import config
 from app.keyboards.main_kb import get_manager_main_kb, get_rating_kb
-
 from app.database.db import AsyncSessionLocal
 from app.database.models import Request, User, Car, ServiceCenter
 from app.services.chat_service import update_chat_keyboard
 
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-
 router = Router()
+
+PAGE_SIZE = 5
 
 
 # ==========================
@@ -240,6 +239,8 @@ async def manager_new_requests(callback: CallbackQuery):
         callback,
         title="📥 Новые заявки",
         status_filter=["new"],
+        list_key="new",
+        page=1,
     )
 
 
@@ -252,6 +253,8 @@ async def manager_in_progress(callback: CallbackQuery):
         callback,
         title="🔄 Заявки в обработке",
         status_filter=["accepted", "in_progress"],
+        list_key="in_progress",
+        page=1,
     )
 
 
@@ -264,6 +267,8 @@ async def manager_scheduled(callback: CallbackQuery):
         callback,
         title="📅 Запланированные работы",
         status_filter=["accepted_by_client"],
+        list_key="scheduled",
+        page=1,
     )
 
 
@@ -276,6 +281,47 @@ async def manager_archive(callback: CallbackQuery):
         callback,
         title="📁 Архив заявок",
         status_filter=["completed", "rejected"],
+        list_key="archive",
+        page=1,
+    )
+
+
+@router.callback_query(F.data.startswith("manager_list_page:"))
+async def manager_list_page(callback: CallbackQuery):
+    """
+    Пагинация списков заявок менеджера.
+    Формат callback_data: manager_list_page:<list_key>:<page>
+    """
+    if not await is_manager(callback.from_user.id):
+        await callback.answer("❌ Нет доступа", show_alert=True)
+        return
+
+    try:
+        _, list_key, raw_page = callback.data.split(":")
+        page = int(raw_page)
+    except Exception:
+        await callback.answer("Некорректные данные пагинации", show_alert=True)
+        return
+
+    if list_key == "noop":
+        await callback.answer()
+        return
+
+    mapping = {
+        "new": ("📥 Новые заявки", ["new"]),
+        "in_progress": ("🔄 Заявки в обработке", ["accepted", "in_progress"]),
+        "scheduled": ("📅 Запланированные работы", ["accepted_by_client"]),
+        "archive": ("📁 Архив заявок", ["completed", "rejected"]),
+    }
+
+    title, statuses = mapping.get(list_key, ("📥 Новые заявки", ["new"]))
+
+    await _send_requests_list(
+        callback,
+        title=title,
+        status_filter=statuses,
+        list_key=list_key,
+        page=page,
     )
 
 
@@ -283,24 +329,58 @@ async def _send_requests_list(
     callback: CallbackQuery,
     title: str,
     status_filter: Optional[list[str]] = None,
+    list_key: str = "new",
+    page: int = 1,
 ):
     """
     Общая функция отправки списка заявок менеджеру.
+    С учётом привязки к сервису и пагинации.
     """
     if not await is_manager(callback.from_user.id):
         await callback.answer("❌ Нет доступа", show_alert=True)
         return
 
+    if page < 1:
+        page = 1
+
+    # Определяем, к какому СТО относится менеджер
+    sc_id = await get_manager_sc_id(callback.from_user.id)
+
     async with AsyncSessionLocal() as session:
+        # Считаем общее количество заявок по фильтру
+        count_stmt = select(func.count()).select_from(Request)
+        if sc_id is not None:
+            count_stmt = count_stmt.where(Request.service_center_id == sc_id)
+        if status_filter:
+            count_stmt = count_stmt.where(Request.status.in_(status_filter))
+
+        total = (await session.execute(count_stmt)).scalar() or 0
+        if total == 0:
+            await callback.message.edit_text(
+                f"{title}\n\nПо данному фильтру заявок не найдено.",
+                reply_markup=get_manager_main_kb(),
+            )
+            await callback.answer()
+            return
+
+        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        if page > total_pages:
+            page = total_pages
+
+        offset = (page - 1) * PAGE_SIZE
+
+        # Получаем нужную страницу
         stmt = (
             select(Request, User, Car)
             .join(User, Request.user_id == User.id)
             .join(Car, Request.car_id == Car.id, isouter=True)
-            .order_by(Request.created_at.desc())
-            .limit(20)
         )
+        if sc_id is not None:
+            stmt = stmt.where(Request.service_center_id == sc_id)
         if status_filter:
             stmt = stmt.where(Request.status.in_(status_filter))
+
+        stmt = stmt.order_by(Request.created_at.desc()).offset(offset).limit(PAGE_SIZE)
 
         result = await session.execute(stmt)
         rows = result.all()
@@ -315,16 +395,41 @@ async def _send_requests_list(
 
     requests = [r[0] for r in rows]
 
-    lines = [title, ""]
+    lines = [f"{title} (стр. {page}/{total_pages})", ""]
     for req, user, car in rows:
         lines.append(_format_request_short(req, user, car))
         lines.append("")
 
-    kb = _build_requests_list_kb(requests)
+    # Кнопки "Открыть #id"
+    base_kb = _build_requests_list_kb(requests).as_markup()
+
+    # Добавляем пагинацию
+    nav_builder = InlineKeyboardBuilder()
+    if total_pages > 1:
+        if page > 1:
+            nav_builder.button(
+                text="⬅️ Назад",
+                callback_data=f"manager_list_page:{list_key}:{page - 1}",
+            )
+        nav_builder.button(
+            text=f"Стр. {page}/{total_pages}",
+            callback_data="manager_list_page:noop:0",
+        )
+        if page < total_pages:
+            nav_builder.button(
+                text="Вперёд ➡️",
+                callback_data=f"manager_list_page:{list_key}:{page + 1}",
+            )
+        nav_builder.adjust(3)
+
+    nav_markup = nav_builder.as_markup()
+    # Склеиваем клавиатуры: сначала заявки, потом навигация
+    if nav_markup.inline_keyboard:
+        base_kb.inline_keyboard.extend(nav_markup.inline_keyboard)
 
     await callback.message.edit_text(
         "\n".join(lines),
-        reply_markup=kb.as_markup(),
+        reply_markup=base_kb,
     )
     await callback.answer()
 
@@ -366,21 +471,29 @@ async def manager_search_process(message: Message, state: FSMContext):
 
     like = f"%{query.upper()}%"
 
+    # СТО менеджера (или None для админа)
+    sc_id = await get_manager_sc_id(message.from_user.id)
+
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
+        stmt = (
             select(Request, User, Car)
-                .join(User, Request.user_id == User.id)
-                .join(Car, Request.car_id == Car.id, isouter=True)
-                .where(
+            .join(User, Request.user_id == User.id)
+            .join(Car, Request.car_id == Car.id, isouter=True)
+            .where(
                 func.upper(User.full_name).like(like)
                 | func.upper(User.phone_number).like(like)
                 | func.upper(Car.license_plate).like(like)
                 | func.upper(Car.vin).like(like)
                 | func.upper(Request.description).like(like)
             )
-                .order_by(Request.created_at.desc())
-                .limit(20)
+            .order_by(Request.created_at.desc())
+            .limit(20)
         )
+
+        if sc_id is not None:
+            stmt = stmt.where(Request.service_center_id == sc_id)
+
+        result = await session.execute(stmt)
         rows = result.all()
 
     if not rows:
@@ -428,13 +541,18 @@ async def manager_open_request(callback: CallbackQuery):
         await callback.answer("Некорректный ID заявки", show_alert=True)
         return
 
+    # СТО менеджера (или None для админа)
+    sc_id = await get_manager_sc_id(callback.from_user.id)
+
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
+        stmt = (
             select(Request, User, Car)
-                .join(User, Request.user_id == User.id)
-                .join(Car, Request.car_id == Car.id, isouter=True)
-                .where(Request.id == request_id)
+            .join(User, Request.user_id == User.id)
+            .join(Car, Request.car_id == Car.id, isouter=True)
+            .where(Request.id == request_id)
         )
+
+        result = await session.execute(stmt)
         row = result.first()
 
     if not row:
@@ -442,6 +560,12 @@ async def manager_open_request(callback: CallbackQuery):
         return
 
     req, user, car = row
+
+    # Проверка принадлежности заявки этому сервису
+    if sc_id is not None and req.service_center_id != sc_id:
+        await callback.answer("❌ У вас нет доступа к этой заявке.", show_alert=True)
+        return
+
     text = _format_request_full(req, user, car)
     kb = _get_request_actions_kb(req)
 
@@ -475,6 +599,9 @@ async def manager_set_status(callback: CallbackQuery):
         await callback.answer("Некорректные данные", show_alert=True)
         return
 
+    # СТО менеджера (или None для админа)
+    sc_id = await get_manager_sc_id(callback.from_user.id)
+
     # 1. Обновляем статус заявки
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -484,6 +611,11 @@ async def manager_set_status(callback: CallbackQuery):
 
         if not req:
             await callback.answer("Заявка не найдена", show_alert=True)
+            return
+
+        # Проверяем принадлежность заявки текущему сервису
+        if sc_id is not None and req.service_center_id != sc_id:
+            await callback.answer("❌ У вас нет прав изменять эту заявку.", show_alert=True)
             return
 
         # Не трогаем завершённые/отклонённые
@@ -597,3 +729,27 @@ async def manager_set_status(callback: CallbackQuery):
         logging.error(f"❌ Не удалось обновить чат заявки #{request_id}: {e}")
 
     await callback.answer("Статус заявки обновлён.")
+
+
+# ==========================
+#   Вспомогалка: СТО менеджера
+# ==========================
+
+async def get_manager_sc_id(user_id: int) -> Optional[int]:
+    """
+    Возвращает id ServiceCenter, к которому относится менеджер.
+
+    - Если это ADMIN_USER_ID — возвращаем None (видит все заявки).
+    - Если пользователь — владелец сервиса, вернём id этого сервиса.
+    """
+    if user_id == config.ADMIN_USER_ID:
+        return None
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter).join(
+                User, ServiceCenter.owner_user_id == User.id
+            ).where(User.telegram_id == user_id)
+        )
+        sc = result.scalar_one_or_none()
+        return sc.id if sc else None

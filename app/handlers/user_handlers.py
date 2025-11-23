@@ -4,13 +4,14 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select
+from sqlalchemy import select, func
 from datetime import datetime
 import logging
 
 from app.services.notification_service import notify_manager_about_new_request
 from app.services.bonus_service import add_bonus, get_user_balance
-from app.database.models import User, Car, Request, ServiceCenter, Comment
+from app.database.models import User, Car, Request, ServiceCenter
+from app.database.comment_models import Comment
 from app.database.db import AsyncSessionLocal
 from app.keyboards.main_kb import (
     get_main_kb, get_registration_kb,
@@ -1994,85 +1995,196 @@ async def edit_request(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+CLIENT_PAGE_SIZE = 5
+
+# Ключи фильтров для истории заявок клиента
+CLIENT_STATUS_FILTERS = {
+    "all": None,  # все заявки
+    "active": ["new", "offer_sent", "accepted", "accepted_by_client", "in_progress"],
+    "archived": ["completed", "rejected"],
+    "new": ["new", "offer_sent"],
+    "accepted": ["accepted", "accepted_by_client"],
+    "in_progress": ["in_progress"],
+    "completed": ["completed"],
+    "rejected": ["rejected"],
+}
+
+CLIENT_FILTER_TITLES = {
+    "all": "Все заявки",
+    "active": "Активные заявки",
+    "archived": "Архив заявок",
+    "new": "Новые заявки",
+    "accepted": "Принятые заявки",
+    "in_progress": "Заявки в работе",
+    "completed": "Завершённые заявки",
+    "rejected": "Отклонённые заявки",
+}
+
+
 @router.callback_query(F.data == "my_requests")
 async def my_requests(callback: CallbackQuery, state: FSMContext):
+    """
+    Мои заявки — сразу показываем список с фильтрами и пагинацией.
+    По умолчанию — все заявки.
+    """
     await state.clear()
-    await callback.message.edit_text(
-        "📋 Ваши заявки.\n\n"
-        "Выберите, что показать:",
-        reply_markup=get_history_kb()
-    )
+    await show_requests_list(callback, filter_key="all", page=1)
     await callback.answer()
 
 
 @router.callback_query(F.data == "history_active")
 async def history_active(callback: CallbackQuery, state: FSMContext):
-    await show_requests_list(callback, filter_status="active")
+    """
+    Старый пункт меню "Активные" — делаем просто пресет фильтра.
+    """
+    await state.clear()
+    await show_requests_list(callback, filter_key="active", page=1)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "history_archived")
 async def history_archived(callback: CallbackQuery, state: FSMContext):
-    await show_requests_list(callback, filter_status="archived")
+    """
+    Старый пункт меню "Архив" — пресет фильтра archived.
+    """
+    await state.clear()
+    await show_requests_list(callback, filter_key="archived", page=1)
+    await callback.answer()
 
 
-async def show_requests_list(callback: CallbackQuery, filter_status: str = None):
+@router.callback_query(F.data.startswith("history_filter:"))
+async def history_filter(callback: CallbackQuery, state: FSMContext):
+    """
+    Универсальный обработчик фильтров/страниц истории.
+    Формат callback_data: history_filter:<filter_key>:<page>
+    """
+    if not callback.data:
+        await callback.answer()
+        return
+
+    try:
+        _, filter_key, raw_page = callback.data.split(":")
+        page = int(raw_page)
+    except Exception:
+        await callback.answer("Некорректные данные фильтра.", show_alert=True)
+        return
+
+    await state.clear()
+    await show_requests_list(callback, filter_key=filter_key, page=page)
+    await callback.answer()
+
+
+async def show_requests_list(
+    callback: CallbackQuery,
+    filter_key: str = "all",
+    page: int = 1,
+):
+    """
+    Список заявок клиента с фильтрами по статусам и пагинацией.
+    """
+    if page < 1:
+        page = 1
+
     async with AsyncSessionLocal() as session:
         try:
             user_id = callback.from_user.id
-            
-            user_result = await session.execute(select(User).where(User.telegram_id == user_id))
+
+            user_result = await session.execute(
+                select(User).where(User.telegram_id == user_id)
+            )
             user = user_result.scalar_one_or_none()
-            
+
             if not user:
                 await callback.message.edit_text("❌ Пользователь не найден. Начните с /start")
                 return
-            
-            query = select(Request).where(Request.user_id == user.id)
-            
-            if filter_status == "active":
-                query = query.where(Request.status.in_(["new", "in_progress", "scheduled", "in_work", "to_pay"]))
-            elif filter_status == "archived":
-                query = query.where(Request.status.in_(["paid", "archived", "rejected"]))
-            
-            result = await session.execute(query)
-            requests = result.scalars().all()
-            
-            if not requests:
-                if filter_status == "active":
+
+            # Базовый фильтр по пользователю
+            base_filter = (Request.user_id == user.id)
+
+            # Статусы по выбранному фильтру
+            statuses = CLIENT_STATUS_FILTERS.get(filter_key)
+            if statuses is None and filter_key not in CLIENT_STATUS_FILTERS:
+                # неизвестный фильтр -> переключаемся на "all"
+                filter_key = "all"
+                statuses = CLIENT_STATUS_FILTERS["all"]
+
+            # Считаем общее количество заявок
+            count_stmt = select(func.count()).select_from(Request).where(base_filter)
+            if statuses:
+                count_stmt = count_stmt.where(Request.status.in_(statuses))
+
+            total = (await session.execute(count_stmt)).scalar() or 0
+            if total == 0:
+                if filter_key == "active":
                     text = "📋 У вас нет активных заявок."
-                elif filter_status == "archived":
+                elif filter_key == "archived":
                     text = "📁 У вас нет архивных заявок."
                 else:
                     text = "📋 У вас пока нет заявок."
-                
-                await callback.message.edit_text(
-                    text,
-                    reply_markup=get_history_kb()
-                )
+
+                kb = _build_history_kb(filter_key, page=1, total_pages=1)
+                await callback.message.edit_text(text, reply_markup=kb)
                 return
-            
-            lines = []
+
+            total_pages = max(1, (total + CLIENT_PAGE_SIZE - 1) // CLIENT_PAGE_SIZE)
+            if page > total_pages:
+                page = total_pages
+
+            offset = (page - 1) * CLIENT_PAGE_SIZE
+
+            # Выбираем нужную страницу
+            query = (
+                select(Request)
+                .where(base_filter)
+                .order_by(Request.created_at.desc())
+            )
+            if statuses:
+                query = query.where(Request.status.in_(statuses))
+
+            query = query.offset(offset).limit(CLIENT_PAGE_SIZE)
+
+            result = await session.execute(query)
+            requests = result.scalars().all()
+
+            if not requests:
+                text = "📋 По данному фильтру заявок не найдено."
+                kb = _build_history_kb(filter_key, page=page, total_pages=total_pages)
+                await callback.message.edit_text(text, reply_markup=kb)
+                return
+
+            # Формируем текст
+            title = CLIENT_FILTER_TITLES.get(filter_key, "Мои заявки")
+            lines: list[str] = [f"📋 {title} (стр. {page}/{total_pages})", ""]
+
             for req in requests:
                 status_emoji = {
                     "new": "🆕",
-                    "in_progress": "🔄",
-                    "scheduled": "📅",
-                    "in_work": "🔧",
-                    "to_pay": "💰",
-                    "paid": "✅",
-                    "archived": "📁",
-                    "rejected": "❌"
+                    "offer_sent": "📨",
+                    "accepted_by_client": "✅",
+                    "accepted": "👍",
+                    "in_progress": "🔧",
+                    "completed": "🏁",
+                    "rejected": "❌",
                 }.get(req.status, "❔")
-                
+
+                created = req.created_at.strftime("%d.%m.%Y %H:%M") if req.created_at else "—"
+                desc = (req.description or "").strip()
+                if len(desc) > 50:
+                    desc = desc[:50] + "..."
+
                 lines.append(
                     f"{status_emoji} Заявка #{req.id}: {req.service_type}\n"
                     f"   Статус: {req.status}\n"
-                    f"   Описание: {req.description[:50]}{'...' if len(req.description) > 50 else ''}"
+                    f"   Создана: {created}\n"
+                    f"   Описание: {desc}"
                 )
-            
+                lines.append("")
+
+            kb = _build_history_kb(filter_key, page=page, total_pages=total_pages)
+
             await callback.message.edit_text(
-                "📋 Ваши заявки:\n\n" + "\n\n".join(lines),
-                reply_markup=get_history_kb()
+                "\n".join(lines),
+                reply_markup=kb,
             )
         except Exception as e:
             logging.error(f"❌ Ошибка при загрузке списка заявок: {e}")
@@ -2080,6 +2192,94 @@ async def show_requests_list(callback: CallbackQuery, filter_status: str = None)
                 "❌ Ошибка при загрузке заявок. Попробуйте позже.",
                 reply_markup=get_main_kb()
             )
+
+
+def _build_history_kb(filter_key: str, page: int, total_pages: int):
+    """
+    Клавиатура для истории заявок: фильтры + пагинация.
+    """
+    builder = InlineKeyboardBuilder()
+
+    def ftxt(key: str, label: str) -> str:
+        return f"• {label}" if key == filter_key else label
+
+        # Основные фильтры
+    builder.row(
+        InlineKeyboardButton(
+            text=ftxt("all", "📋 Все"),
+            callback_data="history_filter:all:1",
+        ),
+        InlineKeyboardButton(
+            text=ftxt("active", "🟢 Активные"),
+            callback_data="history_filter:active:1",
+        ),
+        InlineKeyboardButton(
+            text=ftxt("archived", "📁 Архив"),
+            callback_data="history_filter:archived:1",
+        ),
+    )
+
+    # Детальные фильтры
+    builder.row(
+        InlineKeyboardButton(
+            text=ftxt("new", "🆕 Новые"),
+            callback_data="history_filter:new:1",
+        ),
+        InlineKeyboardButton(
+            text=ftxt("accepted", "👍 Приняты"),
+            callback_data="history_filter:accepted:1",
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=ftxt("in_progress", "🔧 В работе"),
+            callback_data="history_filter:in_progress:1",
+        ),
+        InlineKeyboardButton(
+            text=ftxt("completed", "🏁 Завершённые"),
+            callback_data="history_filter:completed:1",
+        ),
+        InlineKeyboardButton(
+            text=ftxt("rejected", "❌ Отклонённые"),
+            callback_data="history_filter:rejected:1",
+        ),
+    )
+
+    # Пагинация
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=f"history_filter:{filter_key}:{page - 1}",
+                )
+            )
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text=f"Стр. {page}/{total_pages}",
+                callback_data=f"history_filter:{filter_key}:{page}",
+            )
+        )
+        if page < total_pages:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="Вперёд ➡️",
+                    callback_data=f"history_filter:{filter_key}:{page + 1}",
+                )
+            )
+
+        builder.row(*nav_buttons)
+
+    # Назад в меню
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ В меню",
+            callback_data="back_to_main",
+        )
+    )
+
+    return builder.as_markup()
 
 
 @router.callback_query(F.data.startswith("client_accept_offer:"))

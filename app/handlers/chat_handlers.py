@@ -13,6 +13,7 @@ from app.database.db import AsyncSessionLocal
 from app.database.models import Request, User, ServiceCenter
 from app.services.chat_service import update_chat_keyboard
 from app.services.bonus_service import add_bonus
+from app.keyboards.main_kb import get_rating_kb
 
 router = Router()
 
@@ -58,15 +59,6 @@ def _ensure_manager_chat(callback: CallbackQuery) -> bool:
     - группа автосервиса
 
     Клиенты эти кнопки не видят, поэтому здесь достаточно такой проверки.
-    """
-    if not callback.message or not callback.message.chat:
-        return False
-    return True
-
-
-def _ensure_manager_chat(callback: CallbackQuery) -> bool:
-    """
-    Проверяем, что коллбек пришёл из "менеджерского" контекста.
     """
     if not callback.message or not callback.message.chat:
         return False
@@ -781,6 +773,7 @@ async def manager_complete_request(callback: CallbackQuery):
             return
 
     # Бонус за завершённую заявку
+    # Бонус за завершённую заявку
     try:
         await add_bonus(
             user.telegram_id,
@@ -790,14 +783,15 @@ async def manager_complete_request(callback: CallbackQuery):
     except Exception as bonus_err:
         logging.error(f"❌ Ошибка начисления бонуса за завершение заявки: {bonus_err}")
 
-    # Уведомляем клиента
+    # Уведомляем клиента и просим оценить сервис
     try:
         await callback.bot.send_message(
             chat_id=user.telegram_id,
             text=(
-                f"✅ Работы по вашей заявке #{request.id} завершены.\n"
-                f"Спасибо за обращение!"
+                f"🏁 Работы по вашей заявке #{request.id} завершены.\n"
+                f"Пожалуйста, оцените работу сервиса по шкале от 1 до 5."
             ),
+            reply_markup=get_rating_kb(request.id),
         )
     except Exception as e:
         logging.error(
