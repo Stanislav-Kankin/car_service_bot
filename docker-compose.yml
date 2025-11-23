@@ -21,5 +21,15 @@ services:
       - "6379:6379"
     restart: unless-stopped
 
+  bot:
+    build: .
+    container_name: carbot_app
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
 volumes:
   postgres_data:
