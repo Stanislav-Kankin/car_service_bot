@@ -15,15 +15,6 @@ from app.database.base import Base
 
 
 class ServiceCenter(Base):
-    """
-    Автосервис (СТО).
-
-    На этом этапе храним минимальный набор:
-    - название, адрес, телефон
-    - владелец (User с role='service')
-    - настройки уведомлений (LS / группа)
-    - рейтинг (будем заполнять на следующих этапах)
-    """
     __tablename__ = "service_centers"
 
     id = Column(Integer, primary_key=True)
@@ -31,21 +22,20 @@ class ServiceCenter(Base):
     address = Column(String(255))
     phone = Column(String(20))
 
-    # Владелец сервиса (пользователь с role='service')
+    # новые важные поля
+    specializations = Column(Text)
+    category_code = Column(String(50))
+
     owner_user_id = Column(
         Integer,
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
 
-    # Куда слать заявки
-    # ЛС владельцу
     send_to_owner = Column(Boolean, default=True)
-    # В группу Telegram (chat_id, как в MANAGER_CHAT_ID)
     manager_chat_id = Column(BigInteger, nullable=True)
     send_to_group = Column(Boolean, default=False)
 
-    # Рейтинг (сделаем на следующих этапах)
     rating = Column(Float, default=0.0)
     ratings_count = Column(Integer, default=0)
 
@@ -62,7 +52,7 @@ class User(Base):
     role = Column(String(20), nullable=False, default="client")
 
     # ✅ Дополнительные поля для автосервиса
-    service_name = Column(String(200))  # Название сервиса
+    service_name = Column(String(200))   # Название сервиса
     service_address = Column(String(255))  # Адрес сервиса
 
 
@@ -77,7 +67,7 @@ class Car(Base):
     model = Column(String(100), nullable=False)
     year = Column(Integer)
     license_plate = Column(String(20))
-    # ✅ VIN — теперь часть карточки автомобиля
+    # ✅ VIN — часть карточки автомобиля
     vin = Column(String(50))
 
 
@@ -99,7 +89,10 @@ class Request(Base):
         nullable=True,
     )
 
+    # Человекочитаемый тип работ (то, что видит пользователь/менеджер)
     service_type = Column(String(50), nullable=False)
+    category_code = Column(String(50))
+
     description = Column(Text)
     photo_file_id = Column(String(255))
 

@@ -9,6 +9,7 @@ from redis.asyncio import Redis
 from app.config import config
 from app.database import db
 from app.handlers import user_handlers, manager_handlers, group_handlers, chat_handlers
+from app.handlers.admin_handlers import router as admin_router
 
 async def main():
     # Проверяем конфигурацию перед запуском
@@ -37,6 +38,7 @@ async def main():
         dp.include_router(manager_handlers.router)
         dp.include_router(group_handlers.router)
         dp.include_router(chat_handlers.router)
+        dp.include_router(admin_router)
 
         # Создание таблиц в БД (АСИНХРОННО с await!)
         await db.create_tables()  # ← ДОБАВИТЬ AWAIT

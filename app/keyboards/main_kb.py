@@ -436,6 +436,61 @@ def get_role_kb():
     return builder.as_markup()
 
 
+# Опции специализаций для автосервисов
+# код, человекочитаемое название
+SERVICE_SPECIALIZATION_OPTIONS: list[tuple[str, str]] = [
+    ("wash", "🧼 Автомойка"),
+    ("tire", "🛞 Шиномонтаж"),
+    ("electric", "⚡ Автоэлектрик"),
+    ("mechanic", "🔧 Слесарные работы"),
+    ("paint", "🎨 Малярные работы"),
+    ("maint", "🛠️ Техобслуживание"),
+    ("agg_turbo", "🌀 Турбины"),
+    ("agg_starter", "🔋 Стартеры"),
+    ("agg_generator", "⚡ Генераторы"),
+    ("agg_steering", "🛞 Рулевые рейки"),
+]
+
+
+def get_service_specializations_kb(
+    selected: set[str] | None = None,
+) -> InlineKeyboardMarkup:
+    """
+    Мультивыбор специализаций автосервиса при регистрации.
+
+    selected — множество выбранных кодов ('wash', 'tire', ...).
+    """
+    if selected is None:
+        selected = set()
+
+    builder = InlineKeyboardBuilder()
+
+    for code, label in SERVICE_SPECIALIZATION_OPTIONS:
+        prefix = "✅ " if code in selected else ""
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{prefix}{label}",
+                callback_data=f"spec_toggle:{code}",
+            )
+        )
+
+    # Кнопки управления
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Готово",
+            callback_data="spec_done",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⏭️ Пропустить (принимать любые заявки)",
+            callback_data="spec_skip",
+        )
+    )
+
+    return builder.as_markup()
+
+
 def get_service_notifications_kb():
     """
     Куда отдавать заявки автосервису при регистрации.

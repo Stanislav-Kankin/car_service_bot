@@ -22,9 +22,13 @@ from app.keyboards.main_kb import (
     get_photo_skip_kb, get_request_confirm_kb,
     get_delete_confirm_kb, get_history_kb, get_edit_cancel_kb,
     get_can_drive_kb, get_location_reply_kb, get_role_kb,
-    get_manager_main_kb, get_service_notifications_kb
+    get_manager_main_kb, get_service_notifications_kb,
+    get_service_specializations_kb
 )
 from app.config import config
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class CarForm(StatesGroup):
@@ -42,10 +46,18 @@ class CarForm(StatesGroup):
 
 
 class RequestForm(StatesGroup):
+    # Шаг выбора автомобиля
+    car_selection = State()
+
+    # Шаг выбора автосервиса из подходящих
+    service_center = State()
+
     # Основной тип услуги (группа работ)
     service_type = State()
-    # Подтип услуги
+    # Уточняющий тип/подтип услуги внутри группы
     service_subtype = State()
+
+    # Остальные шаги заявки
     description = State()
     photo = State()
     can_drive = State()
@@ -54,11 +66,13 @@ class RequestForm(StatesGroup):
     confirm = State()
 
 
+
 class Registration(StatesGroup):
     role = State()
     name = State()
     service_name = State()
     service_address = State()
+    service_specializations = State()
     phone = State()
     notifications = State()
     group_chat = State()
@@ -348,7 +362,23 @@ async def process_service_address(message: Message, state: FSMContext):
 
     await state.update_data(service_address=address)
 
-    # И теперь уже просим телефон, как и у клиента
+    data = await state.get_data()
+    role = data.get("role") or "client"
+
+    # Для автосервиса — сразу спрашиваем специализации
+    if role == "service":
+        await message.answer(
+            "Отлично! Теперь выберите, <b>какие виды работ вы выполняете</b>.\n\n"
+            "Можно выбрать несколько пунктов, нажимая на них.\n"
+            "Когда закончите — нажмите «✅ Готово».\n\n"
+            "Если вы готовы принимать любые заявки, нажмите «⏭️ Пропустить».",
+            parse_mode="HTML",
+            reply_markup=get_service_specializations_kb(),
+        )
+        await state.set_state(Registration.service_specializations)
+        return
+
+    # Теоретически сюда клиент не попадёт, но оставим фоллбек на телефон
     await message.answer(
         "Отлично! Теперь нажмите на кнопку ниже, чтобы отправить номер телефона:",
         reply_markup=get_phone_reply_kb(),
@@ -356,8 +386,104 @@ async def process_service_address(message: Message, state: FSMContext):
     await state.set_state(Registration.phone)
 
 
+@router.callback_query(
+    Registration.service_specializations,
+    F.data.startswith("spec_toggle:")
+)
+async def toggle_service_specialization(callback: CallbackQuery, state: FSMContext):
+    """
+    Переключение отдельной специализации (выбрана/не выбрана).
+    """
+    _, code = callback.data.split(":", maxsplit=1)
+
+    data = await state.get_data()
+    selected = set(data.get("service_specializations") or [])
+
+    if code in selected:
+        selected.remove(code)
+    else:
+        selected.add(code)
+
+    await state.update_data(service_specializations=list(selected))
+
+    # Обновляем клавиатуру с учетом выбранных пунктов
+    await callback.message.edit_reply_markup(
+        reply_markup=get_service_specializations_kb(selected)
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    Registration.service_specializations,
+    F.data == "spec_done",
+)
+async def done_service_specializations(callback: CallbackQuery, state: FSMContext):
+    """
+    Пользователь нажал «Готово».
+    Если ничего не выбрано — просим либо выбрать, либо нажать «Пропустить».
+    """
+    data = await state.get_data()
+    selected = data.get("service_specializations") or []
+
+    if not selected:
+        await callback.answer(
+            "Выберите хотя бы одну специализацию или нажмите «Пропустить».",
+            show_alert=True,
+        )
+        return
+
+    # Снимаем inline-клавиатуру со старого сообщения (не обязательно, но аккуратно)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # Отправляем НОВОЕ сообщение с reply-клавиатурой (это уже можно)
+    await callback.message.answer(
+        "Отлично! Теперь нажмите на кнопку ниже, чтобы отправить номер телефона:",
+        reply_markup=get_phone_reply_kb(),
+    )
+
+    await state.set_state(Registration.phone)
+    await callback.answer()
+
+
+@router.callback_query(
+    Registration.service_specializations,
+    F.data == "spec_skip",
+)
+async def skip_service_specializations(callback: CallbackQuery, state: FSMContext):
+    """
+    Пользователь решил принимать любые заявки — не задаём специализации.
+    specializations в БД останется NULL → трактуем как «универсальный сервис».
+    """
+    await state.update_data(service_specializations=None)
+
+    # Убираем inline-клаву
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # Новое сообщение с reply-клавиатурой
+    await callback.message.answer(
+        "Хорошо, вы будете получать <b>все типы заявок</b>.\n\n"
+        "Теперь нажмите на кнопку ниже, чтобы отправить номер телефона:",
+        parse_mode="HTML",
+        reply_markup=get_phone_reply_kb(),
+    )
+
+    await state.set_state(Registration.phone)
+    await callback.answer()
+
+
+@router.message(Registration.phone)
 @router.message(Registration.phone)
 async def process_phone_registration(message: Message, state: FSMContext):
+    """
+    Завершение шага регистрации: получение телефона, создание/обновление User
+    и, при необходимости, ServiceCenter (для роли service).
+    """
     # На всякий случай — защита, если вдруг прилетит не контакт
     if not message.contact:
         await message.answer(
@@ -373,6 +499,7 @@ async def process_phone_registration(message: Message, state: FSMContext):
     role = data.get("role") or "client"
     service_name = data.get("service_name")
     service_address = data.get("service_address")
+    service_specializations = data.get("service_specializations")  # может быть None/список
 
     async with AsyncSessionLocal() as session:
         try:
@@ -380,19 +507,22 @@ async def process_phone_registration(message: Message, state: FSMContext):
             result = await session.execute(
                 select(User).where(User.telegram_id == message.from_user.id)
             )
-            user = result.scalar_one_or_none()
+            user: User | None = result.scalar_one_or_none()
+            is_new_user = user is None
 
             if user:
-                # Обновляем существующего
+                # Обновляем данные существующего пользователя
                 user.full_name = name
                 user.phone_number = phone_number
                 user.role = role
-
                 if role == "service":
-                    user.service_name = service_name
+                    user.service_name = service_name or name
                     user.service_address = service_address
+                else:
+                    user.service_name = None
+                    user.service_address = None
             else:
-                # Создаём нового
+                # Создаём нового пользователя
                 user = User(
                     telegram_id=message.from_user.id,
                     full_name=name,
@@ -412,7 +542,7 @@ async def process_phone_registration(message: Message, state: FSMContext):
                 sc_result = await session.execute(
                     select(ServiceCenter).where(ServiceCenter.owner_user_id == user.id)
                 )
-                service_center = sc_result.scalar_one_or_none()
+                service_center: ServiceCenter | None = sc_result.scalar_one_or_none()
 
                 if not service_center:
                     service_center = ServiceCenter(
@@ -421,24 +551,35 @@ async def process_phone_registration(message: Message, state: FSMContext):
                         phone=user.phone_number,
                         owner_user_id=user.id,
                         # по умолчанию — заявки идут в ЛС,
-                        # дальше уже на шаге уведомлений/группы настраиваем
+                        # дальше на шаге уведомлений/группы настраиваем
                         send_to_owner=True,
                         send_to_group=False,
                         manager_chat_id=None,
                     )
                     session.add(service_center)
-                    await session.commit()
-                    await session.refresh(service_center)
 
+                # Обновляем специализации, если шаг проходили
+                if service_specializations is not None:
+                    if service_specializations:
+                        # список кодов → строка "wash,tire,agg_turbo"
+                        service_center.specializations = ",".join(service_specializations)
+                    else:
+                        # пустой список → трактуем как «универсальный сервис»
+                        service_center.specializations = None
+
+                await session.commit()
+                await session.refresh(service_center)
                 service_center_id = service_center.id
 
                 logging.info(
                     f"✅ Зарегистрирован/обновлён автосервис для пользователя {message.from_user.id} "
-                    f"(ServiceCenter id={service_center.id})"
+                    f"(ServiceCenter id={service_center.id}, "
+                    f"specializations={service_center.specializations!r})"
                 )
             else:
                 logging.info(
-                    f"🔄 Обновлена регистрация пользователя {message.from_user.id} (role={role})"
+                    f"✅ Пользователь {message.from_user.id} зарегистрирован/обновлён как клиент "
+                    f"(role={role}, phone={phone_number})"
                 )
 
         except Exception as e:
@@ -451,19 +592,11 @@ async def process_phone_registration(message: Message, state: FSMContext):
             await state.clear()
             return
 
-    # Дальше логика как и была в новой версии:
-    if role == "service":
-        # идём на шаг выбора, куда слать заявки (ЛС / группа / ЛС+группа)
-        # — он у тебя уже реализован через состояние Registration.notifications
-        await state.update_data(service_center_id=service_center_id)
-        await state.set_state(Registration.notifications)
+    # Сохраняем в FSM на всякий случай (может пригодиться дальше)
+    await state.update_data(user_id=user.id, service_center_id=service_center_id)
 
-        await message.answer(
-            "Теперь выберите, куда вы хотите получать новые заявки:",
-            reply_markup=get_service_notifications_kb(),
-        )
-    else:
-        # клиент — сразу завершаем регистрацию и начисляем бонус
+    # Бонус за регистрацию — только для НОВОГО пользователя
+    if is_new_user:
         try:
             await add_bonus(
                 message.from_user.id,
@@ -473,10 +606,33 @@ async def process_phone_registration(message: Message, state: FSMContext):
         except Exception as bonus_err:
             logging.error(f"❌ Ошибка начисления бонуса за регистрацию: {bonus_err}")
 
+    # Дальше логика развилки по роли
+    if role == "service":
+        # Идём на шаг выбора, куда слать заявки (ЛС / группа / ЛС+группа)
         await message.answer(
+            "📨 Куда вам удобнее получать заявки от клиентов?\n\n"
+            "Выберите вариант ниже:",
+            reply_markup=get_service_notifications_kb(),
+        )
+        await state.set_state(Registration.notifications)
+    else:
+        # Обычный клиент — завершаем регистрацию и показываем главное меню
+        text = (
             "✅ Регистрация завершена!\n\n"
             "Вы зарегистрированы как <b>клиент</b>. "
-            "Теперь можете добавить автомобиль и создать заявку.",
+            "Теперь можете добавить автомобиль и создать заявку."
+        )
+
+        # Аккуратно подцепим только баланс (без истории транзакций)
+        try:
+            balance, _history = await get_user_balance(message.from_user.id)
+            if balance is not None:
+                text += f"\n\n🎁 Ваш текущий бонусный баланс: <b>{balance}</b> баллов."
+        except Exception as balance_err:
+            logging.error(f"❌ Ошибка получения баланса при регистрации: {balance_err}")
+
+        await message.answer(
+            text,
             parse_mode="HTML",
             reply_markup=get_main_kb(),
         )
@@ -1471,9 +1627,9 @@ async def confirm_delete_car(callback: CallbackQuery, state: FSMContext):
 async def cancel_delete_car(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     car_id = data.get("car_id")
-    
+
     await state.clear()
-    
+
     if car_id:
         fake_callback = CallbackQuery(
             id="fake",
@@ -1485,7 +1641,7 @@ async def cancel_delete_car(callback: CallbackQuery, state: FSMContext):
         await select_car(fake_callback, state)
     else:
         await my_garage(callback, state)
-    
+
     await callback.answer()
 
 
@@ -1495,52 +1651,64 @@ async def create_request(callback: CallbackQuery, state: FSMContext):
     async with AsyncSessionLocal() as session:
         try:
             user_id = callback.from_user.id
-            
+
             # Получаем пользователя
-            user_result = await session.execute(select(User).where(User.telegram_id == user_id))
+            user_result = await session.execute(
+                select(User).where(User.telegram_id == user_id)
+            )
             user = user_result.scalar_one_or_none()
-            
+
             if not user:
-                await callback.message.edit_text("❌ Пользователь не найден. Начните с /start")
+                await callback.message.edit_text(
+                    "❌ Пользователь не найден. Начните с /start"
+                )
                 await callback.answer()
                 return
-            
-            # Получаем автомобили
-            cars_result = await session.execute(select(Car).where(Car.user_id == user.id))
+
+            # Получаем автомобили пользователя
+            cars_result = await session.execute(
+                select(Car).where(Car.user_id == user.id)
+            )
             cars = cars_result.scalars().all()
-            
+
             if not cars:
                 await callback.message.edit_text(
                     "🚗 В вашем гараже пока нет автомобилей.\n\n"
                     "Сначала добавьте автомобиль:",
-                    reply_markup=get_garage_kb()
+                    reply_markup=get_garage_kb(),
                 )
                 await callback.answer()
                 return
-            
+
             # Показываем выбор автомобиля
             builder = InlineKeyboardBuilder()
             for car in cars:
                 builder.row(
                     InlineKeyboardButton(
                         text=f"🚗 {car.brand} {car.model}",
-                        callback_data=f"select_car_for_request:{car.id}"
+                        callback_data=f"select_car_for_request:{car.id}",
                     )
                 )
             builder.row(
-                InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request")
+                InlineKeyboardButton(
+                    text="❌ Отменить", callback_data="cancel_request"
+                )
             )
-            
+
             await callback.message.edit_text(
                 "📝 Создание заявки\n\n"
-                "Выберите автомобиль для которого создается заявка:",
-                reply_markup=builder.as_markup()
+                "Выберите автомобиль, для которого создаётся заявка:",
+                reply_markup=builder.as_markup(),
             )
+
+            # ВАЖНО: ставим стейт выбора авто
+            await state.set_state(RequestForm.car_selection)
+
         except Exception as e:
             logging.error(f"❌ Ошибка при создании заявки: {e}")
             await callback.message.edit_text(
                 "❌ Ошибка при создании заявки. Попробуйте позже.",
-                reply_markup=get_main_kb()
+                reply_markup=get_main_kb(),
             )
     await callback.answer()
 
@@ -1548,17 +1716,23 @@ async def create_request(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("create_request_for_car:"))
 async def create_request_for_car(callback: CallbackQuery, state: FSMContext):
     """
-    Создание заявки напрямую из карточки конкретного авто.
-    Теперь: авто уже выбрано → спрашиваем, в какой автосервис отправить.
+    Кнопка на карточке авто "Создать заявку" —
+    сначала привязываем авто, потом спрашиваем тип работ, а не СТО.
     """
     await state.clear()
-    car_id = int(callback.data.split(":")[1])
 
-    # Сохраняем ID автомобиля в состоянии
+    try:
+        _, car_id_str = callback.data.split(":")
+        car_id = int(car_id_str)
+    except (ValueError, IndexError):
+        await callback.answer("Не удалось определить автомобиль 🤔", show_alert=True)
+        return
+
     await state.update_data(car_id=car_id)
+    logger.info("📝 Создание заявки из карточки авто id=%s", car_id)
 
-    # Спрашиваем, в какой сервис отправить заявку
-    await _ask_service_center_for_request(callback, state)
+    await _start_request_service_type_step(callback, state)
+    await callback.answer()
 
 
 async def _start_request_service_type_step(callback: CallbackQuery, state: FSMContext):
@@ -1583,52 +1757,89 @@ async def _start_request_service_type_step(callback: CallbackQuery, state: FSMCo
 
 async def _ask_service_center_for_request(callback: CallbackQuery, state: FSMContext):
     """
-    После выбора автомобиля спрашиваем, в какой автосервис отправить заявку.
+    Шаг: выбор автосервиса для заявки.
+    Если в FSM есть category_code — фильтруем СТО по специализациям.
+    Если подходящих нет — показываем все.
+    Если СТО один — сразу сохраняем и идём к описанию проблемы.
     """
+    data = await state.get_data()
+    category_code: Optional[str] = data.get("category_code")
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(ServiceCenter))
-        services = result.scalars().all()
+        all_services: list[ServiceCenter] = result.scalars().all()
 
-    if not services:
-        await state.clear()
-        await callback.message.edit_text(
-            "🏭 Сейчас нет доступных автосервисов.\n\n"
-            "Попробуйте позже.",
-            reply_markup=get_main_kb(),
+    if not all_services:
+        await callback.message.answer(
+            "Пока нет ни одного подключенного автосервиса. "
+            "Попробуйте создать заявку позже 🙏"
         )
+        await state.clear()
         await callback.answer()
         return
 
-    # Если всего один сервис — выбираем автоматически
+    services = all_services
+
+    # Если есть категория — фильтруем по ней
+    if category_code:
+        def has_category(sc: ServiceCenter) -> bool:
+            if not sc.specializations:
+                return False
+            parts = [p.strip() for p in sc.specializations.split(",") if p.strip()]
+            return category_code in parts
+
+        filtered = [sc for sc in all_services if has_category(sc)]
+        if filtered:
+            services = filtered
+            logger.info(
+                "📊 Для category_code=%s найдено %s подходящих СТО (из %s)",
+                category_code, len(filtered), len(all_services)
+            )
+        else:
+            logger.info(
+                "⚠️ Для category_code=%s не найдено подходящих СТО, показываем все (%s)",
+                category_code, len(all_services)
+            )
+
+    # Если автосервис всего один — выбираем его автоматически
     if len(services) == 1:
         sc = services[0]
         await state.update_data(service_center_id=sc.id)
-        await _start_request_service_type_step(callback, state)
+        logger.info(
+            "✅ Автоматически выбран автосервис id=%s name=%s (category_code=%s)",
+            sc.id, sc.name, category_code,
+        )
+
+        data = await state.get_data()
+        service_name = data.get("service_type", "услуга")
+
+        await callback.message.edit_text(
+            f"🏭 Автосервис: <b>{sc.name}</b>\n"
+            f"🔧 Тип работ: <b>{service_name}</b>\n\n"
+            "Теперь опишите проблему или нужные работы (можно голосом или текстом):",
+            parse_mode="HTML",
+        )
+        await state.set_state(RequestForm.description)
         await callback.answer()
         return
 
-    # Несколько сервисов — даем выбор
+    # Несколько СТО — показываем список
     builder = InlineKeyboardBuilder()
     for sc in services:
-        rating_text = ""
-        if sc.ratings_count and sc.ratings_count > 0:
-            rating_text = f" ⭐ {sc.rating:.1f}"
-
-        builder.row(
-            InlineKeyboardButton(
-                text=f"🏭 {sc.name}{rating_text}",
-                callback_data=f"select_sc_for_request:{sc.id}",
-            )
+        title = sc.name
+        if sc.address:
+            title += f" — {sc.address}"
+        builder.button(
+            text=title,
+            callback_data=f"select_sc_for_request:{sc.id}",
         )
-
-    builder.row(
-        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_request")
-    )
+    builder.adjust(1)
 
     await callback.message.edit_text(
-        "🏭 Выберите автосервис, в который хотите отправить заявку:",
+        "🏭 Выберите автосервис, который будет выполнять работы:",
         reply_markup=builder.as_markup(),
     )
+    await state.set_state(RequestForm.service_center)
     await callback.answer()
 
 
@@ -1643,125 +1854,154 @@ async def cancel_request(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("select_car_for_request:"))
+@router.callback_query(
+    RequestForm.car_selection, F.data.startswith("select_car_for_request:")
+)
 async def select_car_for_request(callback: CallbackQuery, state: FSMContext):
-    car_id = int(callback.data.split(":")[1])
+    """
+    Пользователь выбрал авто из списка при создании заявки.
+
+    Новая логика:
+    1) Сохраняем car_id.
+    2) Переходим к выбору типа/подтипа работ.
+    3) Только после этого показываем список СТО, подходящих по категории.
+    """
+    try:
+        car_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Не удалось определить автомобиль 🤔", show_alert=True)
+        return
 
     # Сохраняем ID автомобиля в состоянии
     await state.update_data(car_id=car_id)
 
-    # Спрашиваем, в какой сервис отправить заявку
-    await _ask_service_center_for_request(callback, state)
+    # Дальше — единый шаг выбора вида работ
+    await _start_request_service_type_step(callback, state)
+    await callback.answer()
 
 
-@router.callback_query(RequestForm.service_type)
+@router.callback_query(RequestForm.service_type, F.data.startswith("service_group_"))
 async def process_service_type(callback: CallbackQuery, state: FSMContext):
-    service_data = callback.data
+    """
+    Пользователь выбрал основную группу услуг.
+    Для некоторых групп сразу ставим category_code и идём к выбору СТО,
+    для других — уточняем подтип (шины, электрика, агрегаты).
+    """
+    group = callback.data  # например, "service_group_wash"
 
-    if service_data == "service_back_to_groups":
-        await callback.message.edit_text(
-            "🛠️ Выберите вид работ:",
-            reply_markup=get_service_types_kb()
-        )
-        await state.set_state(RequestForm.service_type)
-        await callback.answer()
-        return
-
+    # Группы, где нет подтипов — сразу пишем category_code
     direct_groups = {
-        "service_group_wash": "Автомойки",
-        "service_group_mechanic": "Слесарные работы",
-        "service_group_paint": "Малярные работы",
-        "service_group_maint": "Техобслуживание",
+        "service_group_wash": ("Мойка", "wash"),
+        "service_group_mechanic": ("Слесарные работы", "mechanic"),
+        "service_group_paint": ("Малярные работы", "paint"),
+        "service_group_maint": ("ТО / техобслуживание", "maint"),
     }
 
-    if service_data == "service_group_tire":
+    # Группы, где нужно уточнение подтипа
+    subtype_groups = {
+        "service_group_tire": get_tire_subtypes_kb,
+        "service_group_electric": get_electric_subtypes_kb,
+        "service_group_aggregates": get_aggregates_subtypes_kb,
+    }
+
+    # Если нужна детализация — показываем подтипы
+    if group in subtype_groups:
+        kb = subtype_groups[group]()
+        await state.update_data(service_group=group)
         await callback.message.edit_text(
-            "🛞 Шиномонтаж\n\n"
-            "Выберите формат работы:",
-            reply_markup=get_tire_subtypes_kb()
+            "Уточните тип работ:",
+            reply_markup=kb,
         )
         await state.set_state(RequestForm.service_subtype)
         await callback.answer()
         return
 
-    if service_data == "service_group_electric":
-        await callback.message.edit_text(
-            "⚡ Автоэлектрик\n\n"
-            "Выберите формат работы:",
-            reply_markup=get_electric_subtypes_kb()
+    # Прямые группы — сразу сохраняем тип и категорию и переходим к выбору СТО
+    if group in direct_groups:
+        service_name, category_code = direct_groups[group]
+
+        await state.update_data(
+            service_type=service_name,
+            category_code=category_code,
         )
-        await state.set_state(RequestForm.service_subtype)
+
+        logger.info(
+            "✅ Выбран тип работ без подтипа: %s (category_code=%s)",
+            service_name, category_code,
+        )
+
+        # Сначала тип работ → затем список подходящих СТО
+        await _ask_service_center_for_request(callback, state)
         await callback.answer()
         return
 
-    if service_data == "service_group_aggregates":
-        await callback.message.edit_text(
-            "⚙️ Ремонт агрегатов\n\n"
-            "Что именно требуется отремонтировать?",
-            reply_markup=get_aggregates_subtypes_kb()
-        )
-        await state.set_state(RequestForm.service_subtype)
-        await callback.answer()
-        return
-
-    if service_data not in direct_groups:
-        await callback.answer("❌ Неверный тип услуги")
-        return
-
-    service_name = direct_groups[service_data]
-    await state.update_data(service_type=service_name)
-
-    await callback.message.edit_text(
-        f"📝 Услуга: <b>{service_name}</b>\n\n"
-        "Теперь опишите проблему или услугу подробно:\n\n"
-        "<i>Примеры:</i>\n"
-        "• 'Нужна комплексная мойка кузова и салона'\n"
-        "• 'Стук в подвеске на кочках, нужна диагностика'\n"
-        "• 'Требуется замена масла и фильтров'\n"
-        "• 'Кузовной ремонт после небольшого ДТП'",
-        parse_mode="HTML",
-        reply_markup=get_car_cancel_kb()
-    )
-    await state.set_state(RequestForm.description)
-    await callback.answer()
+    await callback.answer("Неизвестный тип работ 🤔", show_alert=True)
 
 
 @router.callback_query(RequestForm.service_subtype)
 async def process_service_subtype(callback: CallbackQuery, state: FSMContext):
-    service_data = callback.data
+    """
+    Пользователь выбрал подтип услуг (шиномонтаж, электрика, агрегаты).
+    Сохраняем человекочитаемое имя + category_code и переходим к выбору СТО.
+    """
+    service_data = callback.data  # например, "service_tire_stationary"
 
     subtype_map = {
-        "service_tire_stationary": "Шиномонтаж (на СТО)",
-        "service_tire_mobile": "Шиномонтаж / Выездной шиномонтаж",
-
-        "service_electric_stationary": "Автоэлектрик (на СТО)",
-        "service_electric_mobile": "Автоэлектрик / Выездной мастер",
-
-        "service_agg_turbo": "Ремонт агрегатов / Турбина",
-        "service_agg_starter": "Ремонт агрегатов / Стартер",
-        "service_agg_generator": "Ремонт агрегатов / Генератор",
-        "service_agg_steering": "Ремонт агрегатов / Рулевая рейка",
+        "service_tire_stationary": (
+            "Стационарный шиномонтаж",
+            "tire",
+        ),
+        "service_tire_mobile": (
+            "Выездной шиномонтаж",
+            "tire",
+        ),
+        "service_electric_stationary": (
+            "Автоэлектрик / диагностика (в сервисе)",
+            "electric",
+        ),
+        "service_electric_mobile": (
+            "Выездной автоэлектрик",
+            "electric",
+        ),
+        "service_agg_turbo": (
+            "Ремонт турбин",
+            "agg_turbo",
+        ),
+        "service_agg_starter": (
+            "Ремонт стартеров и генераторов",
+            "agg_starter",
+        ),
+        "service_agg_generator": (
+            "Ремонт генераторов",
+            "agg_generator",
+        ),
+        "service_agg_steering": (
+            "Ремонт рулевых реек и ГУР",
+            "agg_steering",
+        ),
     }
 
-    if service_data not in subtype_map:
-        await callback.answer("❌ Неверный подтип услуги")
+    info = subtype_map.get(service_data)
+    if not info:
+        await callback.answer("Неизвестный подтип услуги 🤔", show_alert=True)
         return
 
-    service_name = subtype_map[service_data]
-    await state.update_data(service_type=service_name)
+    service_name, category_code = info
 
-    await callback.message.edit_text(
-        f"📝 Услуга: <b>{service_name}</b>\n\n"
-        "Теперь опишите проблему или услугу подробно:\n\n"
-        "<i>Примеры:</i>\n"
-        "• 'Пробило колесо, нужен выездной шиномонтаж'\n"
-        "• 'Авто не заводится, подозрение на стартер'\n"
-        "• 'Снижение тяги, подозрение на турбину'\n"
-        "• 'Люфт руля, подозрение на рулевую рейку'",
-        parse_mode="HTML",
-        reply_markup=get_car_cancel_kb()
+    await state.update_data(
+        service_type=service_name,
+        category_code=category_code,
     )
-    await state.set_state(RequestForm.description)
+
+    logger.info(
+        "✅ Выбран подтип работ: %s (category_code=%s, raw=%s)",
+        service_name,
+        category_code,
+        service_data,
+    )
+
+    # Дальше — выбор автосервиса, который оказывает такие услуги
+    await _ask_service_center_for_request(callback, state)
     await callback.answer()
 
 
@@ -1904,9 +2144,20 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
     loc_lon = data.get("location_lon")
     loc_desc = data.get("location_description")
     service_center_id = data.get("service_center_id")
+    category_code = data.get("category_code")  # 🔹 новое поле
+
+    if not car_id:
+        await callback.message.edit_text(
+            "❌ Автомобиль для заявки не выбран.",
+            reply_markup=get_main_kb()
+        )
+        await state.clear()
+        await callback.answer()
+        return
 
     async with AsyncSessionLocal() as session:
         try:
+            # Находим пользователя
             user_result = await session.execute(
                 select(User).where(User.telegram_id == callback.from_user.id)
             )
@@ -1921,6 +2172,7 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
                 await callback.answer()
                 return
 
+            # Проверяем, что авто принадлежит пользователю
             car_result = await session.execute(
                 select(Car).where(Car.id == car_id, Car.user_id == user.id)
             )
@@ -1935,10 +2187,12 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
                 await callback.answer()
                 return
 
+            # Создаём заявку
             new_request = Request(
                 user_id=user.id,
                 car_id=car.id,
                 service_type=service_type,
+                category_code=category_code,
                 description=description,
                 photo_file_id=photo_id,
                 status="new",
@@ -1962,12 +2216,13 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
                 )
             except Exception as bonus_err:
                 logging.error(f"❌ Ошибка начисления бонуса за создание заявки: {bonus_err}")
-            
+
+            # 🔔 Уведомляем менеджера/сервис о новой заявке
             try:
                 await notify_manager_about_new_request(callback.bot, new_request.id)
             except Exception as notify_error:
                 logging.error(f"❌ Ошибка при отправке уведомления менеджеру: {notify_error}")
-            
+
             await callback.message.edit_text(
                 "✅ Ваша заявка отправлена менеджеру!\n\n"
                 "Вам придет уведомление, когда менеджер начнет обработку.",
@@ -1980,6 +2235,7 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
                 "❌ Ошибка при создании заявки. Попробуйте позже.",
                 reply_markup=get_main_kb()
             )
+
     await state.clear()
     await callback.answer()
 
@@ -2450,15 +2706,16 @@ async def my_points(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("select_sc_for_request:"))
+@router.callback_query(RequestForm.service_center, F.data.startswith("select_sc_for_request:"))
 async def select_sc_for_request(callback: CallbackQuery, state: FSMContext):
     """
-    Пользователь выбрал автосервис для заявки.
+    Пользователь выбрал конкретный автосервис из списка.
+    После этого просим описать проблему.
     """
     try:
         sc_id = int(callback.data.split(":")[1])
-    except ValueError:
-        await callback.answer("❌ Неверный формат данных", show_alert=True)
+    except (ValueError, IndexError):
+        await callback.answer("Не удалось понять, какой автосервис выбран 🤔", show_alert=True)
         return
 
     async with AsyncSessionLocal() as session:
@@ -2468,18 +2725,26 @@ async def select_sc_for_request(callback: CallbackQuery, state: FSMContext):
         sc = result.scalar_one_or_none()
 
     if not sc:
-        await callback.message.edit_text(
-            "❌ Выбранный автосервис не найден. Попробуйте ещё раз.",
-            reply_markup=get_main_kb(),
-        )
-        await state.clear()
-        await callback.answer()
+        await callback.answer("Автосервис не найден, попробуйте ещё раз 🙏", show_alert=True)
         return
 
     await state.update_data(service_center_id=sc.id)
 
-    # Переходим к выбору вида работ
-    await _start_request_service_type_step(callback, state)
+    data = await state.get_data()
+    service_name = data.get("service_type", "услуга")
+
+    logger.info(
+        "✅ Для заявки выбран автосервис id=%s name=%s (service_type=%s)",
+        sc.id, sc.name, service_name,
+    )
+
+    await callback.message.edit_text(
+        f"🏭 Вы выбрали автосервис: <b>{sc.name}</b>\n"
+        f"🔧 Тип работ: <b>{service_name}</b>\n\n"
+        "Теперь опишите проблему или нужные работы (можно голосом или текстом):",
+        parse_mode="HTML",
+    )
+    await state.set_state(RequestForm.description)
     await callback.answer()
 
 
@@ -2641,3 +2906,17 @@ async def handle_rate_request(callback: CallbackQuery):
         logging.error(f"⚠️ Не удалось начислить бонус за оценку: {bonus_err}")
 
     await callback.answer("Спасибо за вашу оценку! 🙌", show_alert=True)
+
+
+@router.callback_query(
+    RequestForm.service_subtype,
+    F.data == "service_back_to_groups",
+)
+async def service_back_to_groups(callback: CallbackQuery, state: FSMContext):
+    """
+    Возврат из подтипов к выбору основной группы услуг.
+    """
+    # Можно при желании чистить старый подтип/категорию:
+    await state.update_data(service_type=None, category_code=None)
+    await _start_request_service_type_step(callback, state)
+    await callback.answer()
