@@ -1,5 +1,12 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove, InlineKeyboardButton
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    ReplyKeyboardRemove,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -23,7 +30,7 @@ from app.keyboards.main_kb import (
     get_delete_confirm_kb, get_history_kb, get_edit_cancel_kb,
     get_can_drive_kb, get_location_reply_kb, get_role_kb,
     get_manager_main_kb, get_service_notifications_kb,
-    get_service_specializations_kb
+    get_service_specializations_kb, get_reset_profile_kb
 )
 from app.config import config
 import logging
@@ -66,7 +73,6 @@ class RequestForm(StatesGroup):
     confirm = State()
 
 
-
 class Registration(StatesGroup):
     role = State()
     name = State()
@@ -76,6 +82,10 @@ class Registration(StatesGroup):
     phone = State()
     notifications = State()
     group_chat = State()
+
+
+class ProfileStates(StatesGroup):
+    waiting_new_phone = State()
 
 
 router = Router()
@@ -103,17 +113,19 @@ async def cmd_start(message: Message, state: FSMContext):
                     )
                     service_center = sc_result.scalar_one_or_none()
 
-                    # Если по какой-то причине сервис не найден
-                    # Если по какой-то причине сервис не найден
-                    if not service_center:
-                        logging.warning(
-                            f"⚠️ Пользователь {message.from_user.id} = service, "
-                            f"но ServiceCenter не найден"
+                # Пользователь уже есть в БД
+                if user:
+                    # 🆕 новый блок: профиль есть, но не завершён
+                    if not user.role or not user.phone_number:
+                        logging.info(
+                            f"ℹ Пользователь {message.from_user.id} есть в БД, "
+                            f"но профиль неполный (role={user.role!r}, phone={user.phone_number!r}) — "
+                            f"запускаем регистрацию заново"
                         )
                         await message.answer(
-                            "🛠 Вы зарегистрированы как автосервис, но профиль сервиса не найден.\n"
-                            "Попробуйте пройти регистрацию ещё раз.",
-                            reply_markup=get_manager_main_kb(),
+                            "👋 Похоже, ваш профиль заполнён не полностью.\n"
+                            "Пройдите регистрацию ещё раз:",
+                            reply_markup=get_registration_kb(),
                         )
                         return
 
@@ -178,6 +190,190 @@ async def cmd_start(message: Message, state: FSMContext):
             await message.answer(
                 "❌ Произошла ошибка при запуске. Попробуйте позже."
             )
+
+
+@router.message(Command("reset"))
+async def cmd_reset_registration(message: Message, state: FSMContext):
+    """
+    Команда для пользователя: сбросить номер телефона и пройти регистрацию заново.
+
+    История заявок и гараж при этом сохраняются.
+    """
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Да, сбросить номер и регистрацию",
+                    callback_data="confirm_reset_registration",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="cancel_reset_registration",
+                )
+            ],
+        ]
+    )
+
+    await message.answer(
+        "⚠️ Вы собираетесь сбросить номер телефона и пройти регистрацию заново.\n\n"
+        "• Ваши заявки и гараж (автомобили) будут сохранены.\n"
+        "• Но вам нужно будет заново выбрать роль (клиент / автосервис) и указать номер.\n\n"
+        "Продолжить?",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data == "cancel_reset_registration")
+async def cancel_reset_registration(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Отменено. Регистрация не сброшена.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "confirm_reset_registration")
+async def confirm_reset_registration(callback: CallbackQuery, state: FSMContext):
+    """
+    Подтверждение сброса регистрации:
+    - очищаем phone_number
+    - (опционально можно сбросить роль/поля сервиса, если решишь)
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            await callback.message.edit_text(
+                "Вы ещё не зарегистрированы. Отправьте /start, чтобы начать."
+            )
+            await callback.answer()
+            return
+
+        # Сбрасываем телефон
+        user.phone_number = None
+
+        # Если хочешь заодно сбрасывать сервисные поля, можно раскомментировать:
+        # user.role = "client"
+        # user.service_name = None
+        # user.service_address = None
+
+        await session.commit()
+
+    await state.clear()
+
+    await callback.message.edit_text(
+        "✅ Ваш номер телефона сброшен.\n\n"
+        "Чтобы пройти регистрацию заново, отправьте команду /start.",
+    )
+    await callback.answer()
+
+
+@router.message(Command("reset"))
+async def cmd_reset_profile(message: Message, state: FSMContext):
+    """
+    Меню сброса профиля:
+    1) Полный сброс (роль/данные сервиса/телефон)
+    2) Только смена номера телефона
+    """
+    await state.clear()
+    await message.answer(
+        "Что вы хотите сделать с профилем?",
+        reply_markup=get_reset_profile_kb(),
+    )
+
+
+@router.callback_query(F.data == "reset_profile_full")
+async def reset_profile_full(callback: CallbackQuery, state: FSMContext):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            await callback.answer("❌ Профиль не найден. Нажмите /start.", show_alert=True)
+            return
+
+        # Сбрасываем ключевые поля профиля,
+        # но НЕ трогаем бонусы, авто и заявки
+        user.phone_number = None
+        user.role = None
+        user.service_name = None
+        user.service_address = None
+
+        # Если был владельцем СТО — отвяжем, но не удаляем сам сервис
+        sc_result = await session.execute(
+            select(ServiceCenter).where(ServiceCenter.owner_user_id == user.id)
+        )
+        service_center = sc_result.scalar_one_or_none()
+        if service_center:
+            service_center.owner_user_id = None
+
+        await session.commit()
+
+    await state.clear()
+    await callback.message.edit_text(
+        "✅ Ваш профиль сброшен.\n\n"
+        "Теперь вы можете заново зарегистрироваться как клиент или как автосервис.\n"
+        "Просто отправьте команду /start.",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "reset_profile_phone")
+async def reset_profile_phone(callback: CallbackQuery, state: FSMContext):
+    """
+    Вариант 2: меняем только номер телефона.
+    Бонусы, авто, заявки и роль остаются.
+    """
+    await state.set_state(ProfileStates.waiting_new_phone)
+    await callback.message.edit_text(
+        "Введите новый номер телефона или отправьте его кнопкой ниже:",
+        reply_markup=get_phone_reply_kb(),
+    )
+    await callback.answer()
+
+
+@router.message(ProfileStates.waiting_new_phone)
+async def process_new_phone(message: Message, state: FSMContext):
+    """
+    Записываем новый телефон в профиль пользователя.
+    """
+    if message.contact and message.contact.phone_number:
+        new_phone = message.contact.phone_number
+    else:
+        new_phone = (message.text or "").strip()
+
+    if not new_phone:
+        await message.answer(
+            "❌ Не удалось прочитать номер телефона. "
+            "Попробуйте ещё раз или используйте кнопку отправки контакта.",
+            reply_markup=get_phone_reply_kb(),
+        )
+        return
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            await message.answer("❌ Профиль не найден. Нажмите /start для регистрации.")
+            await state.clear()
+            return
+
+        user.phone_number = new_phone
+        await session.commit()
+
+    await state.clear()
+    await message.answer(
+        "✅ Номер телефона обновлён.\n\n"
+        "Главное меню:",
+        reply_markup=get_main_kb(),
+    )
 
 
 # Обработчик кнопки "Назад в меню"
