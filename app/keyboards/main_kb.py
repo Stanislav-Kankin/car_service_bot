@@ -530,24 +530,27 @@ def get_rating_kb(request_id: int) -> InlineKeyboardMarkup:
 
 
 # Клавиатура для сброса профиля
-def get_reset_profile_kb():
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="🧹 Полный сброс профиля",
-            callback_data="reset_profile_full",
-        )
+def get_reset_profile_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Полный сброс профиля",
+                    callback_data="reset_profile_full",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📱 Сменить номер телефона",
+                    callback_data="reset_profile_phone",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="cancel_reset_registration",
+                )
+            ],
+        ]
     )
-    builder.row(
-        InlineKeyboardButton(
-            text="📱 Сменить номер телефона",
-            callback_data="reset_profile_phone",
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ В меню",
-            callback_data="back_to_main",
-        )
-    )
-    return builder.as_markup()
+    return kb

@@ -33,7 +33,6 @@ from app.keyboards.main_kb import (
     get_service_specializations_kb, get_reset_profile_kb
 )
 from app.config import config
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +265,11 @@ async def reset_profile_full(callback: CallbackQuery, state: FSMContext):
         # Сбрасываем ключевые поля профиля,
         # но НЕ трогаем бонусы, авто и заявки
         user.phone_number = None
-        user.role = None
+
+        # ВАЖНО: не ставим None в поле с NOT NULL
+        # Превращаем любого в клиента
+        user.role = "client"
+
         user.service_name = None
         user.service_address = None
 
@@ -296,10 +299,19 @@ async def reset_profile_phone(callback: CallbackQuery, state: FSMContext):
     Бонусы, авто, заявки и роль остаются.
     """
     await state.set_state(ProfileStates.waiting_new_phone)
-    await callback.message.edit_text(
+
+    # убираем inline-клавиатуру у старого сообщения (по возможности)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # шлём новое сообщение с reply-клавой
+    await callback.message.answer(
         "Введите новый номер телефона или отправьте его кнопкой ниже:",
         reply_markup=get_phone_reply_kb(),
     )
+
     await callback.answer()
 
 
@@ -640,7 +652,6 @@ async def skip_service_specializations(callback: CallbackQuery, state: FSMContex
     await callback.answer()
 
 
-@router.message(Registration.phone)
 @router.message(Registration.phone)
 async def process_phone_registration(message: Message, state: FSMContext):
     """
