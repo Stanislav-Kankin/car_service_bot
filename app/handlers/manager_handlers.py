@@ -31,14 +31,16 @@ async def is_manager(user_id: int) -> bool:
     Проверяем, является ли пользователь менеджером автосервиса.
 
     Логика:
-    - ADMIN_USER_ID всегда считается менеджером;
-    - иначе смотрим пользователя в БД:
+    - если user_id входит в ADMIN_USER_IDS → это администратор/менеджер;
+    - иначе проверяем пользователя в БД:
         • пользователь существует
         • его роль == "service"
     """
-    if user_id == config.ADMIN_USER_ID:
+    # 1. Глобальный админ
+    if user_id in config.ADMIN_USER_IDS:
         return True
 
+    # 2. Проверяем роль пользователя в БД
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(User).where(User.telegram_id == user_id)

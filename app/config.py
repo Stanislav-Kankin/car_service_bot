@@ -13,19 +13,13 @@ class Config:
     # -------------------
     # База данных
     # -------------------
-    # postgres или sqlite
     DB_TYPE = os.getenv("DB_TYPE", "sqlite").lower()
 
     if DB_TYPE == "postgres":
-        # URL для Postgres:
-        #   можно задать через DB_URL
-        #   либо (как у тебя) через POSTGRES_PASSWORD, где уже лежит полный URL
         DB_URL = os.getenv("DB_URL") or os.getenv("POSTGRES_PASSWORD")
         if not DB_URL:
-            # фоллбек, чтобы не упасть совсем
             DB_URL = "postgresql+asyncpg://car_bot_user:password@localhost/car_service_bot"
     else:
-        # SQLite для разработки (aiosqlite добавляется в db.py)
         DB_URL = os.getenv("SQLITE_DB_URL", "sqlite:///./car_service_bot.db")
 
     # -------------------
@@ -36,8 +30,6 @@ class Config:
     # -------------------
     # Чаты / пользователи
     # -------------------
-    # MANAGER_CHAT_ID теперь ОПЦИОНАЛЬНЫЙ:
-    # - если не задан в .env -> None, никакого глобального чата по умолчанию
     raw_manager_chat_id = os.getenv("MANAGER_CHAT_ID")
     MANAGER_CHAT_ID = None
     if raw_manager_chat_id:
@@ -50,32 +42,36 @@ class Config:
             )
             MANAGER_CHAT_ID = None
 
-    try:
-        ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "281146928"))
-    except ValueError:
-        print(
-            f"⚠️ Некорректный ADMIN_USER_ID={os.getenv('ADMIN_USER_ID')!r}, "
-            f"использую 281146928"
-        )
-        ADMIN_USER_ID = 281146928
+    # -------------------
+    # Администраторы
+    # -------------------
+    ADMIN_USER_IDS = set()
+
+    # Чтение из .env (можно указать через запятую)
+    _raw_ids = os.getenv("ADMIN_USER_IDS", "281146928").split(",")
+    for raw in _raw_ids:
+        raw = raw.strip()
+        if raw.isdigit():
+            ADMIN_USER_IDS.add(int(raw))
+
+    # Добавляем второго админа (временно вручную)
+    ADMIN_USER_IDS.add(6143087987)
 
     # -------------------
     # Бонусы / монетизация
     # -------------------
-    # Все значения можно переопределить в .env
     try:
-        BONUS_REGISTER = int(os.getenv("BONUS_REGISTER", "10"))          # Зарегался
-        BONUS_NEW_REQUEST = int(os.getenv("BONUS_NEW_REQUEST", "5"))     # Оставил заявку
-        BONUS_ACCEPT_OFFER = int(os.getenv("BONUS_ACCEPT_OFFER", "3"))   # Принял условия
-        BONUS_COMPLETE_REQUEST = int(os.getenv("BONUS_COMPLETE_REQUEST", "2"))  # Заявка завершена
-        BONUS_RATE_SERVICE = int(os.getenv("BONUS_RATE_SERVICE", "10"))  # Оценка сервиса
+        BONUS_REGISTER = int(os.getenv("BONUS_REGISTER", "10"))
+        BONUS_NEW_REQUEST = int(os.getenv("BONUS_NEW_REQUEST", "5"))
+        BONUS_ACCEPT_OFFER = int(os.getenv("BONUS_ACCEPT_OFFER", "3"))
+        BONUS_COMPLETE_REQUEST = int(os.getenv("BONUS_COMPLETE_REQUEST", "2"))
+        BONUS_RATE_SERVICE = int(os.getenv("BONUS_RATE_SERVICE", "10"))
     except ValueError:
-        # Фоллбек, если в .env задали мусор
         BONUS_REGISTER = 10
         BONUS_NEW_REQUEST = 5
         BONUS_ACCEPT_OFFER = 3
         BONUS_COMPLETE_REQUEST = 2
-        BONUS_RATE_SERVICE=10
+        BONUS_RATE_SERVICE = 10
 
     @classmethod
     def validate(cls):
@@ -83,9 +79,9 @@ class Config:
             raise ValueError("❌ Отсутствует BOT_TOKEN в .env файле")
 
         print(f"ℹ️ DB_TYPE={cls.DB_TYPE}, DB_URL={cls.DB_URL}")
-        print(f"ℹ️ MANAGER_CHAT_ID={cls.MANAGER_CHAT_ID}, ADMIN_USER_ID={cls.ADMIN_USER_ID}")
+        print(f"ℹ️ MANAGER_CHAT_ID={cls.MANAGER_CHAT_ID}")
+        print(f"ℹ️ ADMIN_USER_IDS={cls.ADMIN_USER_IDS}")
 
-        # Лёгкая проверка на формат ID группы
         if cls.MANAGER_CHAT_ID is not None and cls.MANAGER_CHAT_ID > 0:
             print(
                 "⚠️ MANAGER_CHAT_ID выглядит как положительный ID. "
