@@ -7,12 +7,19 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardButton
 
 from sqlalchemy import select, func
 
 from app.config import config
-from app.keyboards.main_kb import get_manager_main_kb, get_rating_kb
+from app.keyboards.main_kb import (
+    get_manager_main_kb,
+    get_rating_kb,
+    get_service_specializations_kb,
+    get_service_notifications_kb,
+    SERVICE_SPECIALIZATION_OPTIONS,
+)
+
 from app.database.db import AsyncSessionLocal
 from app.database.models import Request, User, Car, ServiceCenter
 from app.services.chat_service import update_chat_keyboard
@@ -59,6 +66,18 @@ async def is_manager(user_id: int) -> bool:
 
 class ManagerSearchStates(StatesGroup):
     waiting_query = State()
+
+
+class ServiceSettingsStates(StatesGroup):
+    """
+    FSM для редактирования настроек автосервиса.
+    """
+    waiting_name = State()
+    waiting_address = State()
+    waiting_phone = State()
+    waiting_location = State()
+    waiting_specializations = State()
+    waiting_notifications = State()
 
 
 # ==========================
@@ -731,6 +750,601 @@ async def manager_set_status(callback: CallbackQuery):
         logging.error(f"❌ Не удалось обновить чат заявки #{request_id}: {e}")
 
     await callback.answer("Статус заявки обновлён.")
+
+
+def _format_specializations_human(specializations: str | None) -> str:
+    """
+    Переводит коды специализаций ('wash', 'tire', ...) в человекочитаемый список.
+    Если None/пусто — считаем, что сервис принимает любые заявки.
+    """
+    if not specializations:
+        return "Принимает все виды заявок (универсальный сервис)"
+
+    codes = [c.strip() for c in specializations.split(",") if c.strip()]
+    if not codes:
+        return "Принимает все виды заявок (универсальный сервис)"
+
+    label_map = dict(SERVICE_SPECIALIZATION_OPTIONS)
+    labels = [label_map.get(c, c) for c in codes]
+    return ", ".join(labels)
+
+
+def _format_notifications_human(sc: ServiceCenter) -> str:
+    """
+    Человекочитаемое описание того, куда уходят заявки.
+    """
+    if sc.send_to_owner and sc.send_to_group:
+        base = "Личные сообщения владельцу и в группу"
+    elif sc.send_to_owner:
+        base = "Только в личные сообщения владельцу"
+    elif sc.send_to_group:
+        base = "Только в группу Telegram"
+    else:
+        base = "Не настроено"
+
+    extra = []
+    if sc.manager_chat_id:
+        extra.append(f"ID группы: {sc.manager_chat_id}")
+
+    if extra:
+        return base + " (" + "; ".join(extra) + ")"
+
+    return base
+
+@router.callback_query(F.data == "manager_settings")
+async def open_service_settings(callback: CallbackQuery, state: FSMContext):
+    """
+    Открывает меню настроек автосервиса для владельца СТО.
+    """
+    user_id = callback.from_user.id
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter)
+            .join(User, ServiceCenter.owner_user_id == User.id)
+            .where(User.telegram_id == user_id)
+        )
+        sc: ServiceCenter | None = result.scalar_one_or_none()
+
+        if not sc:
+            await callback.message.edit_text(
+                "❌ У вашего аккаунта нет привязанного автосервиса.\n\n"
+                "Если вы ещё не регистрировали СТО, пройдите регистрацию через /start.",
+                reply_markup=get_manager_main_kb(),
+            )
+            await callback.answer()
+            return
+
+        specs_text = _format_specializations_human(sc.specializations)
+        notif_text = _format_notifications_human(sc)
+
+        geo_text = (
+            f"{sc.location_lat:.5f}, {sc.location_lon:.5f}"
+            if sc.location_lat is not None and sc.location_lon is not None
+            else "Не указано"
+        )
+
+        text_lines = [
+            "⚙️ <b>Настройки автосервиса</b>\n",
+            f"🏭 <b>Название:</b> {sc.name or '—'}",
+            f"📍 <b>Адрес:</b> {sc.address or '—'}",
+            f"🌐 <b>Геолокация:</b> {geo_text}",
+            f"📞 <b>Телефон для клиентов:</b> {sc.phone or '—'}",
+            "",
+            f"🛠 <b>Виды работ:</b> {specs_text}",
+            f"📨 <b>Уведомления по заявкам:</b> {notif_text}",
+        ]
+
+        kb = InlineKeyboardBuilder()
+        kb.row(
+            InlineKeyboardButton(
+                text="✏️ Изменить название",
+                callback_data="manager_settings_name",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text="📍 Изменить адрес",
+                callback_data="manager_settings_address",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text="🌐 Изменить геолокацию",
+                callback_data="manager_settings_location",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text="🛠 Изменить виды работ",
+                callback_data="manager_settings_specs",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text="📞 Изменить телефон",
+                callback_data="manager_settings_phone",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text="📨 Изменить уведомления",
+                callback_data="manager_settings_notify",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data="manager_settings_back",
+            )
+        )
+
+        await callback.message.edit_text(
+            "\n".join(text_lines),
+            parse_mode="HTML",
+            reply_markup=kb.as_markup(),
+        )
+        await callback.answer()
+
+
+@router.callback_query(F.data == "manager_settings_back")
+async def manager_settings_back(callback: CallbackQuery, state: FSMContext):
+    """
+    Возврат из настроек в основную панель менеджера.
+    """
+    await state.clear()
+    await callback.message.edit_text(
+        "Панель автосервиса:",
+        reply_markup=get_manager_main_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "manager_settings_name")
+async def manager_settings_name(callback: CallbackQuery, state: FSMContext):
+    """
+    Запрашиваем новое название автосервиса.
+    """
+    await state.set_state(ServiceSettingsStates.waiting_name)
+    await callback.message.answer(
+        "✏️ Введите новое <b>название автосервиса</b>.\n\n"
+        "Для отмены можете написать «отмена».",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(ServiceSettingsStates.waiting_name)
+async def service_settings_set_name(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+
+    if text.lower() in ("отмена", "cancel"):
+        await state.clear()
+        await message.answer("❌ Изменение названия отменено.")
+        return
+
+    if len(text) < 2:
+        await message.answer("❌ Название слишком короткое, попробуйте ещё раз.")
+        return
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter)
+            .join(User, ServiceCenter.owner_user_id == User.id)
+            .where(User.telegram_id == message.from_user.id)
+        )
+        sc: ServiceCenter | None = result.scalar_one_or_none()
+
+        if not sc:
+            await state.clear()
+            await message.answer("❌ Автосервис не найден. Попробуйте /start.")
+            return
+
+        sc.name = text
+        try:
+            await session.commit()
+            await message.answer(f"✅ Название автосервиса обновлено на: <b>{text}</b>", parse_mode="HTML")
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"[settings] Ошибка сохранения названия СТО: {e}")
+            await message.answer("❌ Не удалось сохранить новое название. Попробуйте позже.")
+
+    await state.clear()
+
+
+@router.callback_query(F.data == "manager_settings_address")
+async def manager_settings_address(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ServiceSettingsStates.waiting_address)
+    await callback.message.answer(
+        "📍 Введите новый <b>адрес автосервиса</b> в свободной форме.\n\n"
+        "Для отмены можете написать «отмена».",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(ServiceSettingsStates.waiting_address)
+async def service_settings_set_address(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+
+    if text.lower() in ("отмена", "cancel"):
+        await state.clear()
+        await message.answer("❌ Изменение адреса отменено.")
+        return
+
+    if len(text) < 5:
+        await message.answer("❌ Адрес слишком короткий, попробуйте ещё раз.")
+        return
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter)
+            .join(User, ServiceCenter.owner_user_id == User.id)
+            .where(User.telegram_id == message.from_user.id)
+        )
+        sc: ServiceCenter | None = result.scalar_one_or_none()
+
+        if not sc:
+            await state.clear()
+            await message.answer("❌ Автосервис не найден. Попробуйте /start.")
+            return
+
+        sc.address = text
+        try:
+            await session.commit()
+            await message.answer("✅ Адрес автосервиса обновлён.")
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"[settings] Ошибка сохранения адреса СТО: {e}")
+            await message.answer("❌ Не удалось сохранить адрес. Попробуйте позже.")
+
+    await state.clear()
+
+
+@router.callback_query(F.data == "manager_settings_phone")
+async def manager_settings_phone(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ServiceSettingsStates.waiting_phone)
+    await callback.message.answer(
+        "📞 Введите <b>номер телефона для клиентов</b> в формате +7...\n\n"
+        "Для очистки телефона напишите «удалить».\n"
+        "Для отмены — «отмена».",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(ServiceSettingsStates.waiting_phone)
+async def service_settings_set_phone(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+
+    lower = text.lower()
+    if lower in ("отмена", "cancel"):
+        await state.clear()
+        await message.answer("❌ Изменение телефона отменено.")
+        return
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter)
+            .join(User, ServiceCenter.owner_user_id == User.id)
+            .where(User.telegram_id == message.from_user.id)
+        )
+        sc: ServiceCenter | None = result.scalar_one_or_none()
+
+        if not sc:
+            await state.clear()
+            await message.answer("❌ Автосервис не найден. Попробуйте /start.")
+            return
+
+        if lower in ("удалить", "delete", "очистить"):
+            sc.phone = None
+        else:
+            # Можно добавить простую валидацию, но пока ограничимся длиной
+            if len(text) < 5:
+                await message.answer("❌ Похоже на некорректный номер, попробуйте ещё раз.")
+                return
+            sc.phone = text
+
+        try:
+            await session.commit()
+            await message.answer("✅ Телефон автосервиса обновлён.")
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"[settings] Ошибка сохранения телефона СТО: {e}")
+            await message.answer("❌ Не удалось сохранить телефон. Попробуйте позже.")
+
+    await state.clear()
+
+
+@router.callback_query(F.data == "manager_settings_location")
+async def manager_settings_location(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ServiceSettingsStates.waiting_location)
+    await callback.message.answer(
+        "🌐 Отправьте <b>геолокацию автосервиса</b> через стандартную кнопку Telegram.\n\n"
+        "Если хотите <b>очистить</b> координаты, напишите «удалить».\n"
+        "Для отмены — «отмена».",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(ServiceSettingsStates.waiting_location, F.location)
+async def service_settings_set_location_geo(message: Message, state: FSMContext):
+    loc = message.location
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter)
+            .join(User, ServiceCenter.owner_user_id == User.id)
+            .where(User.telegram_id == message.from_user.id)
+        )
+        sc: ServiceCenter | None = result.scalar_one_or_none()
+
+        if not sc:
+            await state.clear()
+            await message.answer("❌ Автосервис не найден. Попробуйте /start.")
+            return
+
+        sc.location_lat = loc.latitude
+        sc.location_lon = loc.longitude
+
+        try:
+            await session.commit()
+            await message.answer(
+                f"✅ Геолокация обновлена: {loc.latitude:.5f}, {loc.longitude:.5f}"
+            )
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"[settings] Ошибка сохранения геолокации СТО: {e}")
+            await message.answer("❌ Не удалось сохранить геолокацию. Попробуйте позже.")
+
+    await state.clear()
+
+@router.message(ServiceSettingsStates.waiting_location)
+async def service_settings_set_location_text(message: Message, state: FSMContext):
+    text = (message.text or "").strip().lower()
+
+    if text in ("отмена", "cancel"):
+        await state.clear()
+        await message.answer("❌ Изменение геолокации отменено.")
+        return
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter)
+            .join(User, ServiceCenter.owner_user_id == User.id)
+            .where(User.telegram_id == message.from_user.id)
+        )
+        sc: ServiceCenter | None = result.scalar_one_or_none()
+
+        if not sc:
+            await state.clear()
+            await message.answer("❌ Автосервис не найден. Попробуйте /start.")
+            return
+
+        if text in ("удалить", "очистить", "delete", "clear"):
+            sc.location_lat = None
+            sc.location_lon = None
+
+            try:
+                await session.commit()
+                await message.answer("✅ Геолокация автосервиса очищена.")
+            except Exception as e:
+                await session.rollback()
+                logging.error(f"[settings] Ошибка очистки геолокации СТО: {e}")
+                await message.answer("❌ Не удалось очистить геолокацию. Попробуйте позже.")
+        else:
+            await message.answer(
+                "❌ Не понял ответ.\n"
+                "Отправьте геолокацию через кнопку или напишите «удалить» / «отмена».",
+            )
+            return
+
+    await state.clear()
+
+
+@router.callback_query(F.data == "manager_settings_specs")
+async def manager_settings_specs(callback: CallbackQuery, state: FSMContext):
+    """
+    Открываем мультивыбор специализаций, как при регистрации.
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter)
+            .join(User, ServiceCenter.owner_user_id == User.id)
+            .where(User.telegram_id == callback.from_user.id)
+        )
+        sc: ServiceCenter | None = result.scalar_one_or_none()
+
+        if not sc:
+            await state.clear()
+            await callback.message.answer("❌ Автосервис не найден. Попробуйте /start.")
+            await callback.answer()
+            return
+
+        if sc.specializations:
+            selected = {c.strip() for c in sc.specializations.split(",") if c.strip()}
+        else:
+            selected = set()
+
+        kb = get_service_specializations_kb(selected)
+
+        await state.set_state(ServiceSettingsStates.waiting_specializations)
+        await callback.message.answer(
+            "🛠 Выберите, какие виды работ вы выполняете.\n\n"
+            "Можно выбирать несколько пунктов, нажимая на них.\n"
+            "Когда закончите — нажмите «✅ Готово».\n\n"
+            "Если хотите принимать все заявки — нажмите «⏭️ Пропустить».",
+            reply_markup=kb,
+        )
+        await callback.answer()
+
+
+@router.callback_query(
+    ServiceSettingsStates.waiting_specializations,
+    F.data.startswith("spec_toggle:"),
+)
+async def settings_toggle_specialization(callback: CallbackQuery, state: FSMContext):
+    code = callback.data.split(":", 1)[1]
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter)
+            .join(User, ServiceCenter.owner_user_id == User.id)
+            .where(User.telegram_id == callback.from_user.id)
+        )
+        sc: ServiceCenter | None = result.scalar_one_or_none()
+
+        if not sc:
+            await state.clear()
+            await callback.message.edit_text("❌ Автосервис не найден. Попробуйте /start.")
+            await callback.answer()
+            return
+
+        if sc.specializations:
+            selected = {c.strip() for c in sc.specializations.split(",") if c.strip()}
+        else:
+            selected = set()
+
+        if code in selected:
+            selected.remove(code)
+        else:
+            selected.add(code)
+
+        sc.specializations = ",".join(sorted(selected)) if selected else None
+
+        try:
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"[settings] Ошибка смены специализаций СТО: {e}")
+            await callback.answer("❌ Не удалось сохранить, попробуйте позже.", show_alert=True)
+            return
+
+        kb = get_service_specializations_kb(selected)
+        await callback.message.edit_reply_markup(reply_markup=kb)
+        await callback.answer()
+
+
+@router.callback_query(
+    ServiceSettingsStates.waiting_specializations,
+    F.data == "spec_done",
+)
+async def settings_specs_done(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer("✅ Виды работ автосервиса обновлены.")
+    await callback.answer()
+
+
+@router.callback_query(
+    ServiceSettingsStates.waiting_specializations,
+    F.data == "spec_skip",
+)
+async def settings_specs_skip(callback: CallbackQuery, state: FSMContext):
+    """
+    Очищаем специализации — считаем сервис универсальным.
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter)
+            .join(User, ServiceCenter.owner_user_id == User.id)
+            .where(User.telegram_id == callback.from_user.id)
+        )
+        sc: ServiceCenter | None = result.scalar_one_or_none()
+
+        if not sc:
+            await state.clear()
+            await callback.message.edit_text("❌ Автосервис не найден. Попробуйте /start.")
+            await callback.answer()
+            return
+
+        sc.specializations = None
+        try:
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"[settings] Ошибка сброса специализаций СТО: {e}")
+            await callback.answer("❌ Не удалось сохранить, попробуйте позже.", show_alert=True)
+            return
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await state.clear()
+    await callback.message.answer(
+        "✅ Теперь вы будете получать <b>все типы заявок</b>.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "manager_settings_notify")
+async def manager_settings_notify(callback: CallbackQuery, state: FSMContext):
+    """
+    Открываем выбор способа уведомлений (ЛС / группа).
+    """
+    await state.set_state(ServiceSettingsStates.waiting_notifications)
+    await callback.message.answer(
+        "📨 Выберите, куда отправлять новые заявки:\n\n"
+        "• 📩 В личные сообщения владельцу\n"
+        "• 👥 В группу Telegram (нужно предварительно привязать группу командой /bind_group)\n",
+        reply_markup=get_service_notifications_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    ServiceSettingsStates.waiting_notifications,
+    F.data.in_(["sc_notif_owner", "sc_notif_group"]),
+)
+async def settings_choose_notifications(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter)
+            .join(User, ServiceCenter.owner_user_id == User.id)
+            .where(User.telegram_id == callback.from_user.id)
+        )
+        sc: ServiceCenter | None = result.scalar_one_or_none()
+
+        if not sc:
+            await state.clear()
+            await callback.message.edit_text("❌ Автосервис не найден. Попробуйте /start.")
+            await callback.answer()
+            return
+
+        if choice == "sc_notif_owner":
+            sc.send_to_owner = True
+            sc.send_to_group = False
+            sc.manager_chat_id = None
+            text = (
+                "✅ Заявки будут приходить <b>в личные сообщения</b> владельцу этого аккаунта."
+            )
+        else:
+            # sc_notif_group
+            sc.send_to_owner = False
+            sc.send_to_group = True
+            # manager_chat_id должен быть выставлен командой /bind_group
+            text = (
+                "✅ Заявки будут отправляться <b>в привязанную группу</b>.\n\n"
+                "Убедитесь, что вы привязали группу командой /bind_group из этой группы."
+            )
+
+        try:
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"[settings] Ошибка смены уведомлений СТО: {e}")
+            await callback.answer("❌ Не удалось сохранить настройки, попробуйте позже.", show_alert=True)
+            return
+
+    await state.clear()
+    await callback.message.edit_text(text, parse_mode="HTML")
+    await callback.answer()
 
 
 # ==========================
