@@ -364,14 +364,22 @@ async def _send_requests_list(
     if page < 1:
         page = 1
 
-    # Определяем, к какому СТО относится менеджер
+    # Определяем, к какому сервису относится менеджер
     sc_id = await get_manager_sc_id(callback.from_user.id)
 
     async with AsyncSessionLocal() as session:
         # Считаем общее количество заявок по фильтру
         count_stmt = select(func.count()).select_from(Request)
+
         if sc_id is not None:
-            count_stmt = count_stmt.where(Request.service_center_id == sc_id)
+            # Менеджер сервиса видит:
+            #  - заявки своего сервиса
+            #  - и непривязанные заявки (service_center_id IS NULL)
+            count_stmt = count_stmt.where(
+                (Request.service_center_id == sc_id)
+                | (Request.service_center_id.is_(None))
+            )
+
         if status_filter:
             count_stmt = count_stmt.where(Request.status.in_(status_filter))
 
@@ -396,8 +404,13 @@ async def _send_requests_list(
             .join(User, Request.user_id == User.id)
             .join(Car, Request.car_id == Car.id, isouter=True)
         )
+
         if sc_id is not None:
-            stmt = stmt.where(Request.service_center_id == sc_id)
+            stmt = stmt.where(
+                (Request.service_center_id == sc_id)
+                | (Request.service_center_id.is_(None))
+            )
+
         if status_filter:
             stmt = stmt.where(Request.status.in_(status_filter))
 
@@ -443,14 +456,20 @@ async def _send_requests_list(
             )
         nav_builder.adjust(3)
 
-    nav_markup = nav_builder.as_markup()
-    # Склеиваем клавиатуры: сначала заявки, потом навигация
-    if nav_markup.inline_keyboard:
-        base_kb.inline_keyboard.extend(nav_markup.inline_keyboard)
+        # Склеиваем клавиатуры: сначала кнопки заявок, потом навигация
+        full_kb = InlineKeyboardBuilder()
+        for row in base_kb.inline_keyboard:
+            full_kb.row(*row)
+        for row in nav_builder.as_markup().inline_keyboard:
+            full_kb.row(*row)
+        reply_markup = full_kb.as_markup()
+    else:
+        reply_markup = base_kb
 
     await callback.message.edit_text(
         "\n".join(lines),
-        reply_markup=base_kb,
+        parse_mode="HTML",
+        reply_markup=reply_markup,
     )
     await callback.answer()
 
@@ -512,7 +531,11 @@ async def manager_search_process(message: Message, state: FSMContext):
         )
 
         if sc_id is not None:
-            stmt = stmt.where(Request.service_center_id == sc_id)
+            # Менеджер сервиса видит только свои и непривязанные заявки
+            stmt = stmt.where(
+                (Request.service_center_id == sc_id)
+                | (Request.service_center_id.is_(None))
+            )
 
         result = await session.execute(stmt)
         rows = result.all()
@@ -536,6 +559,7 @@ async def manager_search_process(message: Message, state: FSMContext):
 
     await message.answer(
         "\n".join(lines),
+        parse_mode="HTML",
         reply_markup=kb.as_markup(),
     )
     await state.clear()
@@ -1355,10 +1379,11 @@ async def get_manager_sc_id(user_id: int) -> Optional[int]:
     """
     Возвращает id ServiceCenter, к которому относится менеджер.
 
-    - Если это ADMIN_USER_ID — возвращаем None (видит все заявки).
+    - Если это админ (ADMIN_USER_IDS) — возвращаем None (видит все заявки).
     - Если пользователь — владелец сервиса, вернём id этого сервиса.
     """
-    if user_id == config.ADMIN_USER_IDS:
+    # Админы видят все заявки, без привязки к конкретному СТО
+    if user_id in config.ADMIN_USER_IDS:
         return None
 
     async with AsyncSessionLocal() as session:
@@ -1368,4 +1393,5 @@ async def get_manager_sc_id(user_id: int) -> Optional[int]:
             ).where(User.telegram_id == user_id)
         )
         sc = result.scalar_one_or_none()
-        return sc.id if sc else None
+
+    return sc.id if sc else None
