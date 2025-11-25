@@ -7,6 +7,7 @@ Create Date: 2025-11-25
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 
 # Идентификаторы миграции
@@ -16,30 +17,92 @@ branch_labels = None
 depends_on = None
 
 
+def _add_column_if_not_exists(table_name: str, column: sa.Column) -> None:
+    """
+    Универсальный помощник: добавляет колонку, только если её ещё нет.
+    Работает и для SQLite, и для Postgres.
+    """
+    bind = op.get_bind()
+    inspector = inspect(bind)
+    cols = [c["name"] for c in inspector.get_columns(table_name)]
+
+    if column.name not in cols:
+        op.add_column(table_name, column)
+
+
 def upgrade() -> None:
     # ---- SERVICE CENTERS ----
-    op.add_column("service_centers", sa.Column("specializations", sa.Text(), nullable=True))
-    op.add_column("service_centers", sa.Column("category_code", sa.String(length=50), nullable=True))
-    op.add_column("service_centers", sa.Column("owner_user_id", sa.Integer(), nullable=True))
-    op.add_column("service_centers", sa.Column("location_lat", sa.Float(), nullable=True))
-    op.add_column("service_centers", sa.Column("location_lon", sa.Float(), nullable=True))
-    op.add_column("service_centers", sa.Column("send_to_owner", sa.Boolean(), nullable=True))
-    op.add_column("service_centers", sa.Column("manager_chat_id", sa.BigInteger(), nullable=True))
-    op.add_column("service_centers", sa.Column("send_to_group", sa.Boolean(), nullable=True))
-    op.add_column("service_centers", sa.Column("rating", sa.Float(), nullable=True))
-    op.add_column("service_centers", sa.Column("ratings_count", sa.Integer(), nullable=True))
+    _add_column_if_not_exists(
+        "service_centers",
+        sa.Column("specializations", sa.Text(), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "service_centers",
+        sa.Column("category_code", sa.String(length=50), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "service_centers",
+        sa.Column("owner_user_id", sa.Integer(), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "service_centers",
+        sa.Column("location_lat", sa.Float(), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "service_centers",
+        sa.Column("location_lon", sa.Float(), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "service_centers",
+        sa.Column("send_to_owner", sa.Boolean(), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "service_centers",
+        sa.Column("manager_chat_id", sa.BigInteger(), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "service_centers",
+        sa.Column("send_to_group", sa.Boolean(), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "service_centers",
+        sa.Column("rating", sa.Float(), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "service_centers",
+        sa.Column("ratings_count", sa.Integer(), nullable=True),
+    )
 
     # ---- REQUESTS ----
-    op.add_column("requests", sa.Column("category_code", sa.String(length=50), nullable=True))
-    op.add_column("requests", sa.Column("location_lat", sa.Float(), nullable=True))
-    op.add_column("requests", sa.Column("location_lon", sa.Float(), nullable=True))
-    op.add_column("requests", sa.Column("location_description", sa.Text(), nullable=True))
-    op.add_column("requests", sa.Column("can_drive", sa.Boolean(), nullable=True))
-    op.add_column("requests", sa.Column("preferred_date", sa.String(length=100), nullable=True))
+    _add_column_if_not_exists(
+        "requests",
+        sa.Column("category_code", sa.String(length=50), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "requests",
+        sa.Column("location_lat", sa.Float(), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "requests",
+        sa.Column("location_lon", sa.Float(), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "requests",
+        sa.Column("location_description", sa.Text(), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "requests",
+        sa.Column("can_drive", sa.Boolean(), nullable=True),
+    )
+    _add_column_if_not_exists(
+        "requests",
+        sa.Column("preferred_date", sa.String(length=100), nullable=True),
+    )
 
 
 def downgrade() -> None:
-    # ---- REQUESTS ----
+    # Здесь можно оставить как есть (drop_column),
+    # т.к. downgrade ты почти точно делать не будешь.
     op.drop_column("requests", "preferred_date")
     op.drop_column("requests", "can_drive")
     op.drop_column("requests", "location_description")
@@ -47,7 +110,6 @@ def downgrade() -> None:
     op.drop_column("requests", "location_lat")
     op.drop_column("requests", "category_code")
 
-    # ---- SERVICE CENTERS ----
     op.drop_column("service_centers", "ratings_count")
     op.drop_column("service_centers", "rating")
     op.drop_column("service_centers", "send_to_group")
