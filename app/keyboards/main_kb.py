@@ -563,7 +563,7 @@ def get_reset_profile_kb() -> InlineKeyboardMarkup:
 
 def get_search_radius_kb() -> InlineKeyboardMarkup:
     """
-    Радиус поиска СТО: 5 / 10 / 30 / 100 км.
+    Радиус поиска СТО + кнопка 'Показать всех'.
     """
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -574,6 +574,12 @@ def get_search_radius_kb() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="30 км", callback_data="radius:30"),
                 InlineKeyboardButton(text="100 км", callback_data="radius:100"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔍 Показать всех",
+                    callback_data="show_all_services"
+                )
             ],
             [
                 InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main"),
