@@ -3204,22 +3204,165 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 @router.callback_query(F.data == "service_centers_search")
-async def service_centers_search_start(callback: CallbackQuery, state: FSMContext):
+async def service_centers_search(callback: CallbackQuery, state: FSMContext):
     """
-    Старт поиска: просим прислать геолокацию.
+    Начало поиска сервисов по радиусу.
     """
     await state.clear()
 
     await callback.message.edit_text(
-        "📍 Чтобы найти ближайшие автосервисы, отправьте вашу геолокацию.\n\n"
-        "Нажмите кнопку ниже или отправьте геолокацию вручную.",
+        "🌍 Выберите радиус поиска:",
+        reply_markup=get_search_radius_kb()
+    )
+    await state.set_state(ServiceSearchStates.radius)
+    await callback.answer()
+
+
+@router.callback_query(ServiceSearchStates.radius, F.data.startswith("radius:"))
+async def select_radius(callback: CallbackQuery, state: FSMContext):
+    radius = int(callback.data.split(":")[1])
+    await state.update_data(radius=radius)
+
+    await callback.message.edit_text(
+        "📍 Отправьте свою геолокацию для поиска СТО:",
     )
     await callback.message.answer(
-        "Отправьте геолокацию:",
+        "Нажмите кнопку ниже, чтобы отправить координаты:",
         reply_markup=get_location_reply_kb(),
     )
+
     await state.set_state(ServiceSearchStates.location)
     await callback.answer()
+
+
+@router.message(ServiceSearchStates.location, F.location)
+async def search_services_by_geo(message: Message, state: FSMContext):
+    """
+    Основная логика поиска сервисов по радиусу.
+    Добавлен fallback — если внутри радиуса никого нет, предлагаем показать всех.
+    """
+    loc = message.location
+    user_lat = loc.latitude
+    user_lon = loc.longitude
+
+    data = await state.get_data()
+    radius = data.get("radius", 10)
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter).where(ServiceCenter.owner_user_id.isnot(None))
+        )
+        all_services = result.scalars().all()
+
+    # ===== Фильтруем по радиусу =====
+    nearby = []
+    far_services = []
+    no_geo = []
+
+    for sc in all_services:
+        if sc.location_lat is None or sc.location_lon is None:
+            no_geo.append(sc)
+            continue
+
+        dist = _haversine_km(user_lat, user_lon, sc.location_lat, sc.location_lon)
+        if dist <= radius:
+            nearby.append((sc, dist))
+        else:
+            far_services.append((sc, dist))
+
+    # ===== Если внутри радиуса НИКОГО =====
+    if not nearby:
+        builder = InlineKeyboardBuilder()
+
+        builder.row(
+            InlineKeyboardButton(
+                text="🔍 Показать всех доступных СТО",
+                callback_data="show_all_services"
+            )
+        )
+        builder.row(
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data="service_centers_search"
+            )
+        )
+
+        await message.answer(
+            "❗ В выбранном радиусе СТО не найдено.\n"
+            "Хотите посмотреть ВСЕ доступные сервисы (с гео и без гео)?",
+            reply_markup=builder.as_markup()
+        )
+        await state.clear()
+        return
+
+    # ===== Вывод СТО по радиусу =====
+    nearby.sort(key=lambda x: x[1])
+
+    lines = ["🏭 <b>Сервисы рядом с вами</b>\n"]
+    kb = InlineKeyboardBuilder()
+
+    for sc, dist in nearby:
+        dist_txt = f"{dist:.1f} км"
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{sc.name} — {dist_txt}",
+                callback_data=f"select_sc_for_request:{sc.id}"
+            )
+        )
+        lines.append(f"• <b>{sc.name}</b> — {dist_txt}")
+
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="service_centers_search"))
+
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=kb.as_markup()
+    )
+    await state.clear()
+
+
+@router.callback_query(F.data == "show_all_services")
+async def show_all_services(callback: CallbackQuery, state: FSMContext):
+    """
+    Показывает все СТО: с геолокацией и без неё.
+    Используется как fallback.
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter).where(ServiceCenter.owner_user_id.isnot(None))
+        )
+        services = result.scalars().all()
+
+    if not services:
+        await callback.message.edit_text(
+            "❗ В системе пока нет автосервисов.",
+            reply_markup=get_main_kb()
+        )
+        await callback.answer()
+        return
+
+    lines = ["🏭 <b>Все доступные СТО</b>\n"]
+    kb = InlineKeyboardBuilder()
+
+    for sc in services:
+        kb.row(
+            InlineKeyboardButton(
+                text=sc.name,
+                callback_data=f"select_sc_for_request:{sc.id}"
+            )
+        )
+        lines.append(f"• <b>{sc.name}</b>")
+
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="service_centers_search"))
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=kb.as_markup()
+    )
+
+    await callback.answer()
+    await state.clear()
 
 
 @router.message(ServiceSearchStates.location)
