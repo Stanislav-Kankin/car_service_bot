@@ -32,6 +32,9 @@ class ServiceCenter(Base):
         nullable=True,
     )
 
+    location_lat = Column(Float)   # широта сервиса
+    location_lon = Column(Float)   # долгота сервиса
+
     send_to_owner = Column(Boolean, default=True)
     manager_chat_id = Column(BigInteger, nullable=True)
     send_to_group = Column(Boolean, default=False)

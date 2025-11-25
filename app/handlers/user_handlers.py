@@ -12,7 +12,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select, func
+
 from datetime import datetime
+from math import radians, sin, cos, sqrt, atan2
 import logging
 
 from app.services.notification_service import notify_manager_about_new_request
@@ -30,8 +32,10 @@ from app.keyboards.main_kb import (
     get_delete_confirm_kb, get_history_kb, get_edit_cancel_kb,
     get_can_drive_kb, get_location_reply_kb, get_role_kb,
     get_manager_main_kb, get_service_notifications_kb,
-    get_service_specializations_kb, get_reset_profile_kb
+    get_service_specializations_kb, get_reset_profile_kb,
+    get_search_radius_kb,
 )
+
 from app.config import config
 
 logger = logging.getLogger(__name__)
@@ -77,6 +81,7 @@ class Registration(StatesGroup):
     name = State()
     service_name = State()
     service_address = State()
+    service_location = State()
     service_specializations = State()
     phone = State()
     notifications = State()
@@ -85,6 +90,15 @@ class Registration(StatesGroup):
 
 class ProfileStates(StatesGroup):
     waiting_new_phone = State()
+
+
+class ServiceSearchStates(StatesGroup):
+    """
+    FSM для поиска сервиса (по радиусу/гео).
+    Пока минимум — одно состояние, когда ждём геолокацию.
+    """
+    radius = State()
+    location = State()
 
 
 router = Router()
@@ -370,12 +384,15 @@ async def back_to_main(callback: CallbackQuery, state: FSMContext):
 async def service_centers_list(callback: CallbackQuery, state: FSMContext):
     """
     Показать пользователю список доступных автосервисов.
-    Пока просто список с рейтингом и адресом.
+    Показываем только активные СТО (есть владелец),
+    плюс, если есть координаты — даём ссылку на карту.
     """
     await state.clear()
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(ServiceCenter))
+        result = await session.execute(
+            select(ServiceCenter).where(ServiceCenter.owner_user_id.isnot(None))
+        )
         services = result.scalars().all()
 
     if not services:
@@ -393,11 +410,22 @@ async def service_centers_list(callback: CallbackQuery, state: FSMContext):
         if sc.ratings_count and sc.ratings_count > 0:
             rating_text = f"⭐ {sc.rating:.1f} ({sc.ratings_count} оценок)"
 
+        # ссылка на карту, если есть координаты
+        geo_link = ""
+        if sc.location_lat is not None and sc.location_lon is not None:
+            geo_url = (
+                f"https://www.google.com/maps?q={sc.location_lat},{sc.location_lon}"
+            )
+            geo_link = (
+                f"  🌍 <a href='{geo_url}'>Открыть на карте</a>\n"
+            )
+
         lines.append(
             f"• <b>{sc.name}</b>\n"
             f"  📍 {sc.address or 'Адрес не указан'}\n"
             f"  ☎️ {sc.phone or 'Телефон не указан'}\n"
             f"  {rating_text}\n"
+            f"{geo_link}"
         )
 
     await callback.message.edit_text(
@@ -540,17 +568,16 @@ async def process_service_address(message: Message, state: FSMContext):
     data = await state.get_data()
     role = data.get("role") or "client"
 
-    # Для автосервиса — сразу спрашиваем специализации
+    # Для автосервиса — сразу спрашиваем расположение на карте
     if role == "service":
         await message.answer(
-            "Отлично! Теперь выберите, <b>какие виды работ вы выполняете</b>.\n\n"
-            "Можно выбрать несколько пунктов, нажимая на них.\n"
-            "Когда закончите — нажмите «✅ Готово».\n\n"
-            "Если вы готовы принимать любые заявки, нажмите «⏭️ Пропустить».",
+            "Теперь укажите <b>расположение автосервиса</b>.\n\n"
+            "Лучше всего отправить геолокацию через кнопку ниже.\n"
+            "Если хотите пропустить этот шаг — напишите «Пропустить».",
             parse_mode="HTML",
-            reply_markup=get_service_specializations_kb(),
+            reply_markup=get_location_reply_kb(),  # уже есть клавиатура с 📍 и «Пропустить»
         )
-        await state.set_state(Registration.service_specializations)
+        await state.set_state(Registration.service_location)
         return
 
     # Теоретически сюда клиент не попадёт, но оставим фоллбек на телефон
@@ -559,6 +586,64 @@ async def process_service_address(message: Message, state: FSMContext):
         reply_markup=get_phone_reply_kb(),
     )
     await state.set_state(Registration.phone)
+
+
+# гео от сервиса
+@router.message(Registration.service_location, F.location)
+async def process_service_location_geo(message: Message, state: FSMContext):
+    """
+    Автосервис отправил геолокацию — сохраняем координаты точки сервиса.
+    """
+    loc = message.location
+
+    await state.update_data(
+        service_location_lat=loc.latitude,
+        service_location_lon=loc.longitude,
+    )
+
+    await message.answer(
+        "Отлично! Теперь выберите, <b>какие виды работ вы выполняете</b>.\n\n"
+        "Можно выбрать несколько пунктов, нажимая на них.\n"
+        "Когда закончите — нажмите «✅ Готово».\n\n"
+        "Если вы готовы принимать любые заявки, нажмите «⏭️ Пропустить».",
+        parse_mode="HTML",
+        reply_markup=get_service_specializations_kb(),
+    )
+    await state.set_state(Registration.service_specializations)
+
+
+# текст / «пропустить»
+@router.message(Registration.service_location)
+async def process_service_location_text(message: Message, state: FSMContext):
+    """
+    Обработка текстового ответа на шаге расположения сервиса.
+    Если пользователь пишет «Пропустить» — координаты остаются пустыми.
+    """
+    text = (message.text or "").strip().lower()
+
+    if "пропустить" in text or "⏭️" in text:
+        # Явно решили не указывать координаты
+        await state.update_data(
+            service_location_lat=None,
+            service_location_lon=None,
+        )
+    else:
+        # Адрес мы уже сохранили на предыдущем шаге в service_address,
+        # здесь дополнительные текстовые данные можно игнорировать
+        await state.update_data(
+            service_location_lat=None,
+            service_location_lon=None,
+        )
+
+    await message.answer(
+        "Отлично! Теперь выберите, <b>какие виды работ вы выполняете</b>.\n\n"
+        "Можно выбрать несколько пунктов, нажимая на них.\n"
+        "Когда закончите — нажмите «✅ Готово».\n\n"
+        "Если вы готовы принимать любые заявки, нажмите «⏭️ Пропустить».",
+        parse_mode="HTML",
+        reply_markup=get_service_specializations_kb(),
+    )
+    await state.set_state(Registration.service_specializations)
 
 
 @router.callback_query(
@@ -675,6 +760,10 @@ async def process_phone_registration(message: Message, state: FSMContext):
     service_address = data.get("service_address")
     service_specializations = data.get("service_specializations")  # может быть None/список
 
+    # 🔹 новые поля — координаты сервиса
+    service_location_lat = data.get("service_location_lat")
+    service_location_lon = data.get("service_location_lon")
+
     async with AsyncSessionLocal() as session:
         try:
             # Ищем пользователя по telegram_id
@@ -719,11 +808,15 @@ async def process_phone_registration(message: Message, state: FSMContext):
                 service_center: ServiceCenter | None = sc_result.scalar_one_or_none()
 
                 if not service_center:
+                    # создаём новый сервис
                     service_center = ServiceCenter(
                         name=user.service_name or user.full_name,
                         address=user.service_address,
                         phone=user.phone_number,
                         owner_user_id=user.id,
+                        # координаты сервиса (могут быть None, если шаг пропустили)
+                        location_lat=service_location_lat,
+                        location_lon=service_location_lon,
                         # по умолчанию — заявки идут в ЛС,
                         # дальше на шаге уведомлений/группы настраиваем
                         send_to_owner=True,
@@ -731,6 +824,19 @@ async def process_phone_registration(message: Message, state: FSMContext):
                         manager_chat_id=None,
                     )
                     session.add(service_center)
+                else:
+                    # обновляем базовые данные существующего сервиса
+                    service_center.name = user.service_name or user.full_name
+                    service_center.address = user.service_address
+                    service_center.phone = user.phone_number
+
+                    # обновляем координаты, если в этот раз их прислали
+                    if (
+                        service_location_lat is not None
+                        and service_location_lon is not None
+                    ):
+                        service_center.location_lat = service_location_lat
+                        service_center.location_lon = service_location_lon
 
                 # Обновляем специализации, если шаг проходили
                 if service_specializations is not None:
@@ -748,7 +854,8 @@ async def process_phone_registration(message: Message, state: FSMContext):
                 logging.info(
                     f"✅ Зарегистрирован/обновлён автосервис для пользователя {message.from_user.id} "
                     f"(ServiceCenter id={service_center.id}, "
-                    f"specializations={service_center.specializations!r})"
+                    f"specializations={service_center.specializations!r}, "
+                    f"location=({service_center.location_lat}, {service_center.location_lon}))"
                 )
             else:
                 logging.info(
@@ -796,15 +903,6 @@ async def process_phone_registration(message: Message, state: FSMContext):
             "Вы зарегистрированы как <b>клиент</b>. "
             "Теперь можете добавить автомобиль и создать заявку."
         )
-
-        # Аккуратно подцепим только баланс (без истории транзакций)
-        try:
-            balance, _history = await get_user_balance(message.from_user.id)
-            if balance is not None:
-                text += f"\n\n🎁 Ваш текущий бонусный баланс: <b>{balance}</b> баллов."
-        except Exception as balance_err:
-            logging.error(f"❌ Ошибка получения баланса при регистрации: {balance_err}")
-
         await message.answer(
             text,
             parse_mode="HTML",
@@ -1931,66 +2029,51 @@ async def _start_request_service_type_step(callback: CallbackQuery, state: FSMCo
 
 async def _ask_service_center_for_request(callback: CallbackQuery, state: FSMContext):
     """
-    Шаг: выбор автосервиса для заявки.
-    Если в FSM есть category_code — фильтруем СТО по специализациям.
-    Если подходящих нет — показываем все.
-    Если СТО один — сразу сохраняем и идём к описанию проблемы.
+    Шаг выбора автосервиса после того, как:
+    - выбран автомобиль
+    - выбран тип/подтип работы (category_code)
     """
     data = await state.get_data()
-    category_code: Optional[str] = data.get("category_code")
+    category_code = data.get("category_code")
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(ServiceCenter))
-        all_services: list[ServiceCenter] = result.scalars().all()
+        # Если category_code не указан (на всякий случай) — берём все активные сервисы
+        base_query = select(ServiceCenter).where(ServiceCenter.owner_user_id.isnot(None))
 
-    if not all_services:
-        await callback.message.answer(
-            "Пока нет ни одного подключенного автосервиса. "
-            "Попробуйте создать заявку позже 🙏"
+        if category_code:
+            # Сервисы, у которых либо:
+            # - есть специализации и среди них есть наш category_code
+            # - либо специализации нет (универсальный сервис)
+            spec_like = f"%{category_code}%"
+            base_query = base_query.where(
+                (ServiceCenter.specializations.ilike(spec_like))
+                | (ServiceCenter.specializations.is_(None))
+            )
+
+        result = await session.execute(base_query.order_by(ServiceCenter.id.desc()))
+        services = result.scalars().all()
+
+    if not services:
+        # Нет подходящих сервисов — даём пользователю продолжить без выбора СТО
+        await callback.message.edit_text(
+            "❌ Подходящих автосервисов сейчас не найдено.\n\n"
+            "Но вы всё равно можете создать заявку — менеджеры увидят её в общем списке.\n\n"
+            "Опишите, пожалуйста, проблему с автомобилем:",
+            reply_markup=None,
+            parse_mode="HTML",
         )
-        await state.clear()
+        await state.set_state(RequestForm.description)
         await callback.answer()
         return
 
-    services = all_services
-
-    # Если есть категория — фильтруем по ней
-    if category_code:
-        def has_category(sc: ServiceCenter) -> bool:
-            if not sc.specializations:
-                return False
-            parts = [p.strip() for p in sc.specializations.split(",") if p.strip()]
-            return category_code in parts
-
-        filtered = [sc for sc in all_services if has_category(sc)]
-        if filtered:
-            services = filtered
-            logger.info(
-                "📊 Для category_code=%s найдено %s подходящих СТО (из %s)",
-                category_code, len(filtered), len(all_services)
-            )
-        else:
-            logger.info(
-                "⚠️ Для category_code=%s не найдено подходящих СТО, показываем все (%s)",
-                category_code, len(all_services)
-            )
-
-    # Если автосервис всего один — выбираем его автоматически
     if len(services) == 1:
-        sc = services[0]
-        await state.update_data(service_center_id=sc.id)
-        logger.info(
-            "✅ Автоматически выбран автосервис id=%s name=%s (category_code=%s)",
-            sc.id, sc.name, category_code,
-        )
-
-        data = await state.get_data()
-        service_name = data.get("service_type", "услуга")
+        # Один подходящий сервис — сразу выбираем его
+        service = services[0]
+        await state.update_data(service_center_id=service.id)
 
         await callback.message.edit_text(
-            f"🏭 Автосервис: <b>{sc.name}</b>\n"
-            f"🔧 Тип работ: <b>{service_name}</b>\n\n"
-            "Теперь опишите проблему или нужные работы (можно голосом или текстом):",
+            f"🏭 Выбран автосервис: <b>{service.name}</b>\n\n"
+            "Теперь опишите, пожалуйста, проблему с автомобилем:",
             parse_mode="HTML",
         )
         await state.set_state(RequestForm.description)
@@ -3098,4 +3181,181 @@ async def service_back_to_groups(callback: CallbackQuery, state: FSMContext):
     # Можно при желании чистить старый подтип/категорию:
     await state.update_data(service_type=None, category_code=None)
     await _start_request_service_type_step(callback, state)
+    await callback.answer()
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Расстояние между двумя точками по сфере (приблизительно по Земле) в километрах.
+    """
+    R = 6371.0  # радиус Земли, км
+
+    lat1_r = radians(lat1)
+    lon1_r = radians(lon1)
+    lat2_r = radians(lat2)
+    lon2_r = radians(lon2)
+
+    dlat = lat2_r - lat1_r
+    dlon = lon2_r - lon1_r
+
+    a = sin(dlat / 2) ** 2 + cos(lat1_r) * cos(lat2_r) * sin(dlon / 2) ** 2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    return R * c
+
+
+@router.callback_query(F.data == "service_centers_search")
+async def service_centers_search_start(callback: CallbackQuery, state: FSMContext):
+    """
+    Старт поиска: просим прислать геолокацию.
+    """
+    await state.clear()
+
+    await callback.message.edit_text(
+        "📍 Чтобы найти ближайшие автосервисы, отправьте вашу геолокацию.\n\n"
+        "Нажмите кнопку ниже или отправьте геолокацию вручную.",
+    )
+    await callback.message.answer(
+        "Отправьте геолокацию:",
+        reply_markup=get_location_reply_kb(),
+    )
+    await state.set_state(ServiceSearchStates.location)
+    await callback.answer()
+
+
+@router.message(ServiceSearchStates.location)
+async def service_search_location(message: Message, state: FSMContext):
+    """
+    Шаг 1 поиска: получаем геолокацию пользователя.
+    """
+    if message.location:
+        loc = message.location
+        await state.update_data(
+            search_lat=loc.latitude,
+            search_lon=loc.longitude,
+        )
+        await message.answer(
+            "Выберите радиус поиска автосервисов:",
+            reply_markup=get_search_radius_kb(),
+        )
+        await state.set_state(ServiceSearchStates.radius)
+        return
+
+    text = (message.text or "").strip().lower()
+    if "пропустить" in text or "отмена" in text:
+        await state.clear()
+        await message.answer(
+            "Поиск по локации отменён.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await message.answer(
+            "Главное меню:",
+            reply_markup=get_main_kb(),
+        )
+        return
+
+    await message.answer(
+        "Пожалуйста, отправьте именно геолокацию через кнопку "
+        "«📍 Отправить геолокацию» внизу экрана."
+    )
+
+
+@router.callback_query(ServiceSearchStates.radius, F.data.startswith("search_radius:"))
+async def service_search_radius(callback: CallbackQuery, state: FSMContext):
+    """
+    Шаг 2 поиска: выбран радиус, считаем расстояние до всех СТО с координатами.
+    Показываем только "живые" сервисы (у которых есть владелец).
+    """
+    try:
+        radius_km = float(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Не удалось понять радиус 😕", show_alert=True)
+        return
+
+    data = await state.get_data()
+    lat = data.get("search_lat")
+    lon = data.get("search_lon")
+
+    if lat is None or lon is None:
+        await state.clear()
+        await callback.message.edit_text(
+            "❌ Не удалось получить вашу геолокацию. Попробуйте начать поиск заново.",
+            reply_markup=get_main_kb(),
+        )
+        await callback.answer()
+        return
+
+    async with AsyncSessionLocal() as session:
+        # 🔹 здесь добавили фильтр по owner_user_id, как в списке "Автосервисы"
+        result = await session.execute(
+            select(ServiceCenter).where(
+                ServiceCenter.owner_user_id.isnot(None),
+                ServiceCenter.location_lat.is_not(None),
+                ServiceCenter.location_lon.is_not(None),
+            )
+        )
+        services = result.scalars().all()
+
+    nearby: list[tuple[ServiceCenter, float]] = []
+    for sc in services:
+        dist = _haversine_km(lat, lon, sc.location_lat, sc.location_lon)
+        if dist <= radius_km:
+            nearby.append((sc, dist))
+
+    nearby.sort(key=lambda x: x[1])
+
+    if not nearby:
+        await callback.message.edit_text(
+            f"😔 В радиусе {radius_km:.0f} км пока нет автосервисов "
+            f"с указанной геолокацией.",
+            reply_markup=get_main_kb(),
+        )
+        await state.clear()
+        await callback.answer()
+        return
+
+    lines: list[str] = [
+        f"🔍 <b>Найдено автосервисов рядом с вами (до {radius_km:.0f} км)</b>\n"
+    ]
+    for sc, dist in nearby:
+        rating_text = ""
+        if getattr(sc, "ratings_count", None) and sc.ratings_count > 0:
+            rating_text = f"⭐ {sc.rating:.1f} ({sc.ratings_count} оценок)"
+
+        maps_url = (
+            f"https://yandex.ru/maps/?ll={sc.location_lon:.6f}%2C{sc.location_lat:.6f}&z=16"
+            if sc.location_lat is not None and sc.location_lon is not None
+            else ""
+        )
+
+        block = (
+            f"• <b>{sc.name}</b> — {dist:.1f} км\n"
+            f"  📍 {sc.address or 'Адрес не указан'}\n"
+            f"  ☎️ {sc.phone or 'Телефон не указан'}\n"
+        )
+        if maps_url:
+            block += f"  🗺 <a href=\"{maps_url}\">Открыть на карте</a>\n"
+        if rating_text:
+            block += f"  {rating_text}\n"
+
+        lines.append(block)
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=get_main_kb(),
+    )
+    await state.clear()
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cancel_service_search")
+async def cancel_service_search(callback: CallbackQuery, state: FSMContext):
+    """
+    Отмена сценария поиска СТО.
+    """
+    await state.clear()
+    await callback.message.edit_text(
+        "Поиск автосервисов отменён.\n\nГлавное меню:",
+        reply_markup=get_main_kb(),
+    )
     await callback.answer()

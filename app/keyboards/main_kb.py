@@ -20,12 +20,17 @@ def get_main_kb():
         InlineKeyboardButton(
             text="ℹ️ Помощь", callback_data="help")
     )
-    # 🔹 Новая строка: список автосервисов + бонусы
+    # 🔹 Автосервисы + бонусы
     builder.row(
         InlineKeyboardButton(
             text="🏭 Автосервисы", callback_data="service_centers_list"),
         InlineKeyboardButton(
             text="🎁 Мои бонусы", callback_data="my_points")
+    )
+    # 🔍 Отдельная кнопка поиска по геолокации
+    builder.row(
+        InlineKeyboardButton(
+            text="🔍 Найти СТО рядом", callback_data="service_centers_search")
     )
     return builder.as_markup()
 
@@ -554,3 +559,37 @@ def get_reset_profile_kb() -> InlineKeyboardMarkup:
         ]
     )
     return kb
+
+
+def get_search_radius_kb() -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора радиуса поиска СТО.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="5 км",
+                    callback_data="search_radius:5",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="10 км",
+                    callback_data="search_radius:10",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="30 км",
+                    callback_data="search_radius:30",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Отмена",
+                    callback_data="cancel_service_search",
+                )
+            ],
+        ]
+    )
