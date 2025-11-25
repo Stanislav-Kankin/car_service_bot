@@ -2,7 +2,7 @@ import logging
 from typing import Optional
 
 from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions
+from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions, InlineKeyboardButton
 
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
@@ -32,7 +32,7 @@ def _format_status(status: Optional[str]) -> str:
 
 def _build_chat_keyboard(request: Request) -> InlineKeyboardMarkup:
     """
-    Формирует inline-клавиатуру под сообщение в группе менеджеров
+    Формирует inline-клавиатуру под сообщение в группе/чате сервиса
     в зависимости от текущего статуса заявки.
 
     Логика:
@@ -40,8 +40,9 @@ def _build_chat_keyboard(request: Request) -> InlineKeyboardMarkup:
     - new:
         • 💬 Ответить клиенту (цена/сроки)
         • ❌ Отклонить заявку (с комментарием)
+        • 🔄 Обновить
     - offer_sent:
-        • только 🔄 Обновить (ждём клиента)
+        • 🔄 Обновить
     - accepted_by_client:
         • ✅ Принять
         • 🔧 Взять в работу
@@ -53,7 +54,7 @@ def _build_chat_keyboard(request: Request) -> InlineKeyboardMarkup:
         • ✅ Завершить
         • ❌ Отменить
     - completed / rejected:
-        • 🔄 Обновить (по факту уже финальные)
+        • 🔄 Обновить
     """
     kb = InlineKeyboardBuilder()
     rid = request.id
@@ -264,6 +265,18 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
 
             text = _format_request_text(request, user, car, service_center)
             keyboard = _build_chat_keyboard(request)
+
+            # 🔹 Добавляем к клавиатуре кнопку "Написать клиенту" с прямой ссылкой в ЛС
+            if user.telegram_id:
+                # keyboard — это InlineKeyboardMarkup, у него есть .inline_keyboard (список рядов)
+                keyboard.inline_keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            text="📩 Написать клиенту",
+                            url=f"tg://user?id={user.telegram_id}",
+                        )
+                    ]
+                )
 
             async def _send_to_chat(chat_id: int) -> Optional[int]:
                 msg = None
