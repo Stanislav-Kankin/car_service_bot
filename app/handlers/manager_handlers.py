@@ -113,6 +113,23 @@ def _format_stage_times(request: Request) -> str:
     return "\n".join(parts)
 
 
+def _human_status(status: Optional[str]) -> str:
+    """
+    Человекочитаемый текст статуса заявки.
+    """
+    status = status or "new"
+    mapping = {
+        "new": "Новая",
+        "offer_sent": "Условия отправлены клиенту",
+        "accepted_by_client": "Принята клиентом (ожидает подтверждения сервиса)",
+        "accepted": "Принята сервисом",
+        "in_progress": "В работе",
+        "completed": "Завершена",
+        "rejected": "Отклонена",
+    }
+    return mapping.get(status, status)
+
+
 def _format_request_short(req: Request, user: User, car: Optional[Car]) -> str:
     car_text = (
         f"{car.brand} {car.model} ({car.year or 'год не указан'}), {car.license_plate}"
@@ -120,13 +137,14 @@ def _format_request_short(req: Request, user: User, car: Optional[Car]) -> str:
         else "без привязанного авто"
     )
     created = req.created_at.strftime("%d.%m.%Y %H:%M") if req.created_at else "—"
+    status_text = _human_status(req.status)
 
     return (
         f"#{req.id} — {req.service_type}\n"
         f"👤 {user.full_name}\n"
         f"🚗 {car_text}\n"
         f"📅 {created}\n"
-        f"📌 Статус: {req.status}"
+        f"📌 Статус: {status_text}"
     )
 
 
@@ -147,7 +165,7 @@ def _format_request_full(req: Request, user: User, car: Optional[Car]) -> str:
         f"🚗 Авто: {car_text}",
         f"🛠 Тип работ: {req.service_type}",
         "",
-        f"📌 Текущий статус: {req.status}",
+        f"📌 Текущий статус: {_human_status(req.status)}",
         "",
         "⏱ История стадий:",
         _format_stage_times(req),

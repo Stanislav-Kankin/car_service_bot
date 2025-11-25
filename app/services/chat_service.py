@@ -2,7 +2,8 @@ import logging
 from typing import Optional
 
 from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions
+
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
@@ -201,18 +202,7 @@ def _format_request_text(
 
 async def create_request_chat(bot: Bot, request_id: int) -> None:
     """
-    Создать/отправить сообщение о заявке в группу/ЛС автосервиса.
-
-    Логика:
-    - Берём заявку, пользователя, авто и сервис.
-    - Определяем, куда слать:
-        • если у заявки есть service_center:
-            - если send_to_group и manager_chat_id → туда
-            - если send_to_owner → в ЛС владельцу
-            - если оба → основной канал = группа, вторичный = ЛС
-        • иначе — fallback на глобальный MANAGER_CHAT_ID (обратная совместимость)
-    - В основной канал сохраняем message_id в request.chat_message_id
-      (для update_chat_keyboard).
+    Создаёт "карточку заявки" в чате сервиса (или общем MANAGER_CHAT_ID).
     """
     async with AsyncSessionLocal() as session:
         try:
@@ -289,6 +279,7 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
                             caption=text,
                             reply_markup=keyboard,
                             parse_mode="HTML",
+                            link_preview_options=LinkPreviewOptions(is_disabled=True),
                         )
                     except Exception as e:
                         logging.error(
@@ -301,6 +292,7 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
                         text=text,
                         reply_markup=keyboard,
                         parse_mode="HTML",
+                        link_preview_options=LinkPreviewOptions(is_disabled=True),
                     )
                 return msg.message_id
 

@@ -1,10 +1,13 @@
 from aiogram import Router, F
 from aiogram.types import (
-    Message,
     CallbackQuery,
+    Message,
+    ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
-    InlineKeyboardButton,
+    KeyboardButton,
     InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    LinkPreviewOptions,
 )
 
 from aiogram.filters import Command, StateFilter
@@ -432,6 +435,7 @@ async def service_centers_list(callback: CallbackQuery, state: FSMContext):
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=get_main_kb(),
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
     await callback.answer()
 
@@ -2775,14 +2779,28 @@ async def show_requests_list(
                     "rejected": "❌",
                 }.get(req.status, "❔")
 
-                created = req.created_at.strftime("%d.%m.%Y %H:%M") if req.created_at else "—"
+                status_label = {
+                    "new": "Новая",
+                    "offer_sent": "Условия от сервиса",
+                    "accepted_by_client": "Принята клиентом",
+                    "accepted": "Принята сервисом",
+                    "in_progress": "В работе",
+                    "completed": "Завершена",
+                    "rejected": "Отклонена",
+                }.get(req.status, req.status)
+
+                created = (
+                    req.created_at.strftime("%d.%m.%Y %H:%M")
+                    if req.created_at
+                    else "—"
+                )
                 desc = (req.description or "").strip()
                 if len(desc) > 50:
-                    desc = desc[:50] + "..."
+                    desc = desc[:50] + "…"
 
                 lines.append(
                     f"{status_emoji} Заявка #{req.id}: {req.service_type}\n"
-                    f"   Статус: {req.status}\n"
+                    f"   Статус: {status_label}\n"
                     f"   Создана: {created}\n"
                     f"   Описание: {desc}"
                 )
@@ -3576,6 +3594,99 @@ async def service_search_radius(callback: CallbackQuery, state: FSMContext):
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=get_main_kb(),
+    )
+    await state.clear()
+    await callback.answer()
+
+
+@router.callback_query(ServiceSearchStates.radius, F.data.startswith("search_radius_"))
+async def service_search_radius_result(callback: CallbackQuery, state: FSMContext):
+    """
+    Шаг 3 поиска: пользователь выбрал радиус, показываем найденные СТО.
+    """
+    data = await state.get_data()
+    lat = data.get("lat")
+    lon = data.get("lon")
+
+    if lat is None or lon is None:
+        await callback.message.edit_text(
+            "Не удалось определить геолокацию. Попробуйте начать поиск заново.",
+            reply_markup=get_main_kb(),
+        )
+        await callback.answer()
+        return
+
+    try:
+        radius_str = callback.data.split("_")[-1]
+        radius_km = float(radius_str)
+    except Exception:
+        await callback.message.edit_text(
+            "Некорректный радиус поиска. Попробуйте начать поиск заново.",
+            reply_markup=get_main_kb(),
+        )
+        await callback.answer()
+        return
+
+    async with AsyncSessionLocal() as session:
+        # 🔹 здесь добавили фильтр по owner_user_id, как в списке "Автосервисы"
+        result = await session.execute(
+            select(ServiceCenter).where(
+                ServiceCenter.owner_user_id.isnot(None),
+                ServiceCenter.location_lat.is_not(None),
+                ServiceCenter.location_lon.is_not(None),
+            )
+        )
+        services = result.scalars().all()
+
+    nearby: list[tuple[ServiceCenter, float]] = []
+    for sc in services:
+        dist = _haversine_km(lat, lon, sc.location_lat, sc.location_lon)
+        if dist <= radius_km:
+            nearby.append((sc, dist))
+
+    nearby.sort(key=lambda x: x[1])
+
+    if not nearby:
+        await callback.message.edit_text(
+            f"😔 В радиусе {radius_km:.0f} км пока нет автосервисов "
+            f"с указанной геолокацией.",
+            reply_markup=get_main_kb(),
+        )
+        await state.clear()
+        await callback.answer()
+        return
+
+    lines: list[str] = [
+        f"🔍 <b>Найдено автосервисов рядом с вами (до {radius_km:.0f} км)</b>\n"
+    ]
+    for sc, dist in nearby:
+        rating_text = ""
+        if getattr(sc, "ratings_count", None) and sc.ratings_count > 0:
+            rating_text = f"⭐ {sc.rating:.1f} ({sc.ratings_count} оценок)"
+
+        maps_url = (
+            f"https://yandex.ru/maps/?ll={sc.location_lon:.6f}%2C{sc.location_lat:.6f}&z=16"
+            if sc.location_lat is not None and sc.location_lon is not None
+            else ""
+        )
+
+        block = (
+            f"• <b>{sc.name}</b> — {dist:.1f} км\n"
+            f"  📍 {sc.address or 'Адрес не указан'}\n"
+            f"  ☎️ {sc.phone or 'Телефон не указан'}\n"
+        )
+        if maps_url:
+            block += f"  🗺 <a href=\"{maps_url}\">Открыть на карте</a>\n"
+        if rating_text:
+            block += f"  {rating_text}\n"
+
+        lines.append(block)
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=get_main_kb(),
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
     await state.clear()
     await callback.answer()

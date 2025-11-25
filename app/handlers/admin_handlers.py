@@ -13,6 +13,7 @@ from app.config import config
 from app.database.db import AsyncSessionLocal
 from app.database.models import User, Request, ServiceCenter, Car
 from app.keyboards.main_kb import SERVICE_SPECIALIZATION_OPTIONS
+from app.services.chat_service import _format_status
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -241,9 +242,11 @@ async def admin_all_requests(callback: CallbackQuery):
 
         service_name = sc.name if sc else "—"
 
+        status_text = _format_status(req.status)
+
         lines.append(
             f"#{req.id}: <b>{req.service_type or req.category_code or 'Без типа'}</b> — "
-            f"<code>{req.status}</code>\n"
+            f"{status_text}\n"
             f"   👤 {user_name}\n"
             f"   🚗 {car_str}\n"
             f"   🏭 {service_name}\n"
