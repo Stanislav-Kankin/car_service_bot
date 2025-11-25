@@ -744,7 +744,7 @@ async def get_manager_sc_id(user_id: int) -> Optional[int]:
     - Если это ADMIN_USER_ID — возвращаем None (видит все заявки).
     - Если пользователь — владелец сервиса, вернём id этого сервиса.
     """
-    if user_id == config.ADMIN_USER_ID:
+    if user_id == config.ADMIN_USER_IDS:
         return None
 
     async with AsyncSessionLocal() as session:
