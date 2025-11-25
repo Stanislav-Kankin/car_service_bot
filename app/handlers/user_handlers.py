@@ -2112,7 +2112,12 @@ async def process_service_type(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Неизвестный тип работ 🤔", show_alert=True)
 
 
-@router.callback_query(RequestForm.service_subtype)
+@router.callback_query(
+    RequestForm.service_subtype,
+    (F.data.startswith("service_tire_") |
+     F.data.startswith("service_electric_") |
+     F.data.startswith("service_agg_"))
+)
 async def process_service_subtype(callback: CallbackQuery, state: FSMContext):
     """
     Пользователь выбрал подтип услуг (шиномонтаж, электрика, агрегаты).
