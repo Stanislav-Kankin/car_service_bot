@@ -1985,6 +1985,96 @@ async def create_request(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.callback_query(StateFilter(None), F.data.startswith("select_sc_for_request:"))
+async def start_request_from_service_search(callback: CallbackQuery, state: FSMContext):
+    """
+    Пользователь выбрал автосервис из поиска / из кнопки 'Показать всех',
+    когда мастер заявки ещё не запущен.
+
+    Запускаем создание НОВОЙ заявки с заранее выбранным СТО:
+    1) сохраняем service_center_id в FSM
+    2) спрашиваем, для какого авто создать заявку (как в create_request)
+    """
+    try:
+        sc_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Не удалось понять, какой автосервис выбран 🤔", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        # Проверяем, что СТО существует
+        result_sc = await session.execute(
+            select(ServiceCenter).where(ServiceCenter.id == sc_id)
+        )
+        sc = result_sc.scalar_one_or_none()
+
+        if not sc:
+            await callback.answer("Автосервис не найден, попробуйте ещё раз 🙏", show_alert=True)
+            return
+
+        # На всякий случай очищаем старое состояние
+        await state.clear()
+
+        # Сохраняем выбранный сервис в FSM
+        await state.update_data(service_center_id=sc.id)
+
+        # Получаем пользователя
+        result_user = await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+        user = result_user.scalar_one_or_none()
+
+        if not user:
+            await callback.message.edit_text(
+                "❌ Пользователь не найден. Начните с /start"
+            )
+            await callback.answer()
+            return
+
+        # Получаем автомобили пользователя
+        result_cars = await session.execute(
+            select(Car).where(Car.user_id == user.id)
+        )
+        cars = result_cars.scalars().all()
+
+    # Вне сессии — только отправка сообщений
+
+    if not cars:
+        await callback.message.edit_text(
+            "🚗 В вашем гараже пока нет автомобилей.\n\n"
+            "Сначала добавьте автомобиль:",
+            reply_markup=get_garage_kb(),
+        )
+        await callback.answer()
+        return
+
+    # Показываем выбор автомобиля (как в create_request)
+    builder = InlineKeyboardBuilder()
+    for car in cars:
+        builder.row(
+            InlineKeyboardButton(
+                text=f"🚗 {car.brand} {car.model}",
+                callback_data=f"select_car_for_request:{car.id}",
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(
+            text="❌ Отменить", callback_data="cancel_request"
+        )
+    )
+
+    await callback.message.edit_text(
+        f"📝 Создание заявки в автосервис <b>{sc.name}</b>\n\n"
+        "Выберите автомобиль, для которого создаётся заявка:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+    # Ставим стейт выбора авто
+    await state.set_state(RequestForm.car_selection)
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("create_request_for_car:"))
 async def create_request_for_car(callback: CallbackQuery, state: FSMContext):
     """
