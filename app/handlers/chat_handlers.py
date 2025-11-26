@@ -3,7 +3,14 @@ from datetime import datetime
 from typing import Optional, Tuple
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import Router, F
+from aiogram.types import (
+    CallbackQuery,
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from sqlalchemy import select
@@ -80,35 +87,35 @@ async def _notify_service_about_client_action(
         • если send_to_group и manager_chat_id → туда
         • иначе, если send_to_owner → ЛС владельца
     - иначе — fallback на MANAGER_CHAT_ID (если он задан)
+
+    Дополнительно:
+    - к уведомлению прикрепляем кнопку "📩 Написать клиенту" (по telegram_id),
+      чтобы можно было сразу открыть чат, не зная номера телефона.
     """
     primary_chat_id: Optional[int] = None
+
+    # 1. Определяем основной чат сервиса
     owner_telegram_id: Optional[int] = None
-
-    # Ищем владельца сервиса, чтобы при необходимости написать ему в ЛС
-    if service_center and service_center.owner_user_id:
-        from sqlalchemy import select as _select
-
-        owner_res = await session.execute(
-            _select(User).where(User.id == service_center.owner_user_id)
-        )
-        owner = owner_res.scalar_one_or_none()
-        if owner and owner.telegram_id:
-            owner_telegram_id = owner.telegram_id
-
-    # Приоритет: группа сервиса → ЛС владельца
     if service_center:
+        # Владелец сервиса (для ЛС)
+        if service_center.owner_user_id:
+            owner_res = await session.execute(
+                select(User).where(User.id == service_center.owner_user_id)
+            )
+            owner = owner_res.scalar_one_or_none()
+            if owner and owner.telegram_id:
+                owner_telegram_id = owner.telegram_id
+
+        # Отправка в группу сервиса
         if service_center.send_to_group and service_center.manager_chat_id:
             primary_chat_id = service_center.manager_chat_id
+        # Или в ЛС владельцу
         elif service_center.send_to_owner and owner_telegram_id:
             primary_chat_id = owner_telegram_id
 
-    # Фоллбек на глобальный MANAGER_CHAT_ID (если задан)
+    # Fallback на MANAGER_CHAT_ID
     if primary_chat_id is None and config.MANAGER_CHAT_ID:
-        try:
-            primary_chat_id = int(config.MANAGER_CHAT_ID)
-        except Exception:
-            logging.error(f"❌ Некорректный MANAGER_CHAT_ID: {config.MANAGER_CHAT_ID}")
-            return
+        primary_chat_id = config.MANAGER_CHAT_ID
 
     if primary_chat_id is None:
         logging.error(
@@ -116,8 +123,37 @@ async def _notify_service_about_client_action(
         )
         return
 
+    # 2. Ищем telegram_id клиента, чтобы сделать кнопку "Написать клиенту"
+    client_tg_id: Optional[int] = None
     try:
-        await bot.send_message(chat_id=primary_chat_id, text=text)
+        user_res = await session.execute(
+            select(User).where(User.id == request.user_id)
+        )
+        db_user = user_res.scalar_one_or_none()
+        if db_user and db_user.telegram_id:
+            client_tg_id = db_user.telegram_id
+    except Exception as e:
+        logging.error(
+            f"❌ Ошибка поиска клиента для уведомления по заявке #{request.id}: {e}"
+        )
+
+    # 3. Собираем клавиатуру
+    kb = None
+    if client_tg_id:
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text="📩 Написать клиенту",
+            url=f"tg://user?id={client_tg_id}",
+        )
+        kb = builder.as_markup()
+
+    # 4. Отправляем уведомление
+    try:
+        await bot.send_message(
+            chat_id=primary_chat_id,
+            text=text,
+            reply_markup=kb,
+        )
     except Exception as e:
         logging.error(
             f"❌ Не удалось отправить уведомление в чат сервиса {primary_chat_id} "
@@ -134,10 +170,8 @@ async def manager_offer_start(callback: CallbackQuery, state: FSMContext):
     """
     Менеджер нажал "Ответить клиенту" под карточкой заявки.
 
-    Дальше запускаем FSM:
-    1) спрашиваем цену
-    2) спрашиваем сроки
-    3) спрашиваем доп. комментарий (опционально)
+    Новый вариант: сразу просим одним сообщением написать все условия
+    (стоимость, сроки, комментарий).
     """
     if not _ensure_manager_chat(callback):
         await callback.answer("Доступно только в чате автосервиса", show_alert=True)
@@ -157,7 +191,8 @@ async def manager_offer_start(callback: CallbackQuery, state: FSMContext):
 
         request, user = data
 
-        if request.status not in ("new", "rejected"):
+        # Разрешаем отправлять условия только по "живым" заявкам
+        if request.status not in ("new", "rejected", "offer_sent"):
             await callback.answer(
                 "Статус заявки не позволяет отправить условия", show_alert=True
             )
@@ -169,10 +204,15 @@ async def manager_offer_start(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.answer(
         f"💬 Заявка #{request_id}\n\n"
-        "Введите <b>стоимость работ</b> для клиента (например: <code>5000 руб</code>):",
+        "Напишите одним сообщением предложение для клиента:\n"
+        "• ориентировочную стоимость;\n"
+        "• примерные сроки выполнения;\n"
+        "• при необходимости дополнительные условия.\n\n"
+        "Пример: <code>Диагностика от 40 BYN, ремонт от 120 BYN, завтра после 14:00</code>",
         parse_mode="HTML",
     )
-    await state.set_state(ManagerOfferStates.waiting_price)
+    # Сразу ждём общий комментарий, price/time больше не спрашиваем
+    await state.set_state(ManagerOfferStates.waiting_comment)
     await callback.answer()
 
 
@@ -212,15 +252,22 @@ async def manager_offer_time(message: Message, state: FSMContext):
 
 @router.message(ManagerOfferStates.waiting_comment)
 async def manager_offer_comment(message: Message, state: FSMContext):
-    comment_raw = (message.text or "").strip()
-    extra_comment = None if not comment_raw or comment_raw == "-" else comment_raw
+    """
+    Менеджер присылает единый текстовый комментарий с условиями:
+    цена + сроки + любые доп. комментарии.
+    """
+    comment_text = (message.text or "").strip()
+    if not comment_text:
+        await message.answer(
+            "❌ Текст предложения не может быть пустым. "
+            "Напишите условия одним сообщением."
+        )
+        return
 
     data = await state.get_data()
     request_id = data.get("request_id")
-    price = data.get("price")
-    time_text = data.get("time")
 
-    if not request_id or not price or not time_text:
+    if not request_id:
         await message.answer(
             "❌ Состояние диалога потеряно. Попробуйте ещё раз с кнопки под заявкой."
         )
@@ -245,17 +292,8 @@ async def manager_offer_comment(message: Message, state: FSMContext):
                 await state.clear()
                 return
 
-            # Формируем текст условий для хранения и показа
-            comment_lines = [
-                f"Стоимость: {price}",
-                f"Сроки: {time_text}",
-            ]
-            if extra_comment:
-                comment_lines.append(f"Комментарий: {extra_comment}")
-
-            manager_comment = "\n".join(comment_lines)
-
-            request.manager_comment = manager_comment
+            # Сохраняем комментарий менеджера и переводим в offer_sent
+            request.manager_comment = comment_text
             request.status = "offer_sent"
             await session.commit()
 
@@ -263,7 +301,9 @@ async def manager_offer_comment(message: Message, state: FSMContext):
             manager_telegram_id = None
             if request.service_center_id:
                 sc_res = await session.execute(
-                    select(ServiceCenter).where(ServiceCenter.id == request.service_center_id)
+                    select(ServiceCenter).where(
+                        ServiceCenter.id == request.service_center_id
+                    )
                 )
                 sc = sc_res.scalar_one_or_none()
                 if sc and sc.owner_user_id:
@@ -274,19 +314,29 @@ async def manager_offer_comment(message: Message, state: FSMContext):
                     if owner and owner.telegram_id:
                         manager_telegram_id = owner.telegram_id
 
-            # Кнопки для клиента: принять / отклонить + написать менеджеру
+            # Кнопки для клиента:
+            # принять с номером / без номера, отклонить + написать менеджеру
             kb_rows = [
                 [
                     InlineKeyboardButton(
-                        text="✅ Принять",
-                        callback_data=f"offer_accept:{request.id}",
-                    ),
+                        text="✅ Принять (показать номер)",
+                        callback_data=f"offer_accept_show_phone:{request.id}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="✅ Принять (не показывать номер)",
+                        callback_data=f"offer_accept_no_phone:{request.id}",
+                    )
+                ],
+                [
                     InlineKeyboardButton(
                         text="❌ Отклонить",
                         callback_data=f"offer_reject:{request.id}",
                     ),
-                ]
+                ],
             ]
+
             if manager_telegram_id:
                 kb_rows.append(
                     [
@@ -302,8 +352,8 @@ async def manager_offer_comment(message: Message, state: FSMContext):
             offer_text = (
                 f"📋 Ваша заявка #{request.id}\n\n"
                 f"🛠 Услуга: {request.service_type}\n\n"
-                f"💬 Условия от сервиса:\n{manager_comment}\n\n"
-                "Вы можете принять, отклонить эти условия или задать вопрос менеджеру:"
+                f"💬 Условия от сервиса:\n{comment_text}\n\n"
+                "Вы можете принять, отклонить эти условия или задать вопрос менеджеру."
             )
 
             try:
@@ -314,7 +364,8 @@ async def manager_offer_comment(message: Message, state: FSMContext):
                 )
             except Exception as send_err:
                 logging.error(
-                    f"❌ Не удалось отправить условия клиенту по заявке #{request.id}: {send_err}"
+                    f"❌ Не удалось отправить условия клиенту по заявке "
+                    f"#{request.id}: {send_err}"
                 )
 
             # Сообщаем менеджеру
@@ -454,6 +505,205 @@ async def manager_reject_reason(message: Message, state: FSMContext):
 async def client_accept_offer(callback: CallbackQuery):
     """
     Клиент принимает условия сервиса по заявке.
+    В этот момент мы отправляем сервису номер телефона клиента.
+    """
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        try:
+            result = await session.execute(
+                select(Request, User, ServiceCenter)
+                .join(User, Request.user_id == User.id)
+                .join(
+                    ServiceCenter,
+                    Request.service_center_id == ServiceCenter.id,
+                    isouter=True,
+                )
+                .where(Request.id == request_id)
+            )
+            row = result.first()
+            if not row:
+                await callback.answer("❌ Заявка не найдена", show_alert=True)
+                return
+
+            request, user, service_center = row
+
+            # Проверяем, что это тот же пользователь
+            if user.telegram_id != callback.from_user.id:
+                await callback.answer(
+                    "❌ Эта заявка принадлежит другому пользователю",
+                    show_alert=True,
+                )
+                return
+
+            if request.status != "offer_sent":
+                await callback.answer(
+                    "Статус заявки не позволяет принять условия", show_alert=True
+                )
+                return
+
+            request.status = "accepted_by_client"
+            request.accepted_at = datetime.now()
+            await session.commit()
+
+            # Текст для уведомления сервиса
+            notify_text = f"✅ Клиент принял условия по заявке #{request.id}."
+            if user.phone_number:
+                notify_text += f"\n📞 Телефон клиента: {user.phone_number}"
+
+            # Уведомляем сервис
+            await _notify_service_about_client_action(
+                callback.bot,
+                session,
+                request,
+                service_center,
+                text=notify_text,
+            )
+
+        except Exception as e:
+            await session.rollback()
+            logging.error(
+                f"❌ Ошибка при подтверждении условий клиентом для заявки #{request_id}: {e}"
+            )
+            await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
+            return
+
+    # Бонус за принятие условий
+    try:
+        await add_bonus(
+            callback.from_user.id,
+            "accept_offer",
+            description=f"Принятие условий по заявке #{request_id}",
+        )
+    except Exception as bonus_err:
+        logging.error(f"❌ Ошибка начисления бонуса за принятие условий: {bonus_err}")
+
+    # Сообщение клиенту
+    await callback.answer(
+        "✅ Вы приняли условия сервиса.\n"
+        "Ваш номер телефона отправлен в автосервис для уточнения деталей.",
+        show_alert=True,
+    )
+
+    # Убираем кнопки под сообщением клиента
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # Обновляем карточку заявки в чате сервиса (кнопки)
+    try:
+        await update_chat_keyboard(callback.bot, request_id)
+    except Exception as e:
+        logging.error(
+            f"❌ Не удалось обновить клавиатуру в чате заявки #{request_id}: {e}"
+        )
+
+@router.callback_query(F.data.startswith("offer_accept_no_phone:"))
+async def client_accept_offer_no_phone(callback: CallbackQuery):
+    """
+    Клиент принимает условия сервиса, НО не отправляет номер телефона.
+    Общение идёт только через чат Telegram.
+    """
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        try:
+            result = await session.execute(
+                select(Request, User, ServiceCenter)
+                .join(User, Request.user_id == User.id)
+                .join(
+                    ServiceCenter,
+                    Request.service_center_id == ServiceCenter.id,
+                    isouter=True,
+                )
+                .where(Request.id == request_id)
+            )
+            row = result.first()
+            if not row:
+                await callback.answer("❌ Заявка не найдена", show_alert=True)
+                return
+
+            request, user, service_center = row
+
+            # Защита от «чужих» заявок
+            if user.telegram_id != callback.from_user.id:
+                await callback.answer(
+                    "❌ Эта заявка принадлежит другому пользователю",
+                    show_alert=True,
+                )
+                return
+
+            if request.status != "offer_sent":
+                await callback.answer(
+                    "Статус заявки не позволяет принять условия", show_alert=True
+                )
+                return
+
+            request.status = "accepted_by_client"
+            request.accepted_at = datetime.now()
+            await session.commit()
+
+            # Уведомляем сервис: клиент принял, но номер не дал
+            await _notify_service_about_client_action(
+                callback.bot,
+                session,
+                request,
+                service_center,
+                text=(
+                    f"✅ Клиент принял условия по заявке #{request.id}.\n"
+                    f"ℹ️ Клиент выбрал НЕ показывать номер телефона.\n"
+                    f"Свяжитесь с ним через чат Telegram."
+                ),
+            )
+
+        except Exception as e:
+            await session.rollback()
+            logging.error(
+                f"❌ Ошибка при подтверждении условий (без номера) клиентом для заявки #{request_id}: {e}"
+            )
+            await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
+            return
+
+    # Бонус за принятие условий
+    try:
+        await add_bonus(
+            callback.from_user.id,
+            "accept_offer",
+            description=f"Принятие условий без показа номера по заявке #{request_id}",
+        )
+    except Exception as bonus_err:
+        logging.error(f"❌ Ошибка начисления бонуса за принятие условий: {bonus_err}")
+
+    await callback.answer("✅ Вы приняли условия сервиса, не показывая номер.", show_alert=True)
+
+    # Убираем кнопки
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # Обновляем карточку заявки в чате сервиса
+    try:
+        await update_chat_keyboard(callback.bot, request_id)
+    except Exception as e:
+        logging.error(
+            f"❌ Не удалось обновить клавиатуру в чате заявки #{request_id}: {e}"
+        )
+
+
+@router.callback_query(F.data.startswith("offer_accept_show_phone:"))
+async def client_accept_offer_show_phone(callback: CallbackQuery):
+    """
+    Клиент принимает условия и СОГЛАШАЕТСЯ показать свой номер телефона сервису.
     """
     try:
         request_id = int(callback.data.split(":")[1])
@@ -497,19 +747,24 @@ async def client_accept_offer(callback: CallbackQuery):
             request.accepted_at = datetime.now()
             await session.commit()
 
-            # Уведомляем сервис о том, что клиент принял условия
+            phone_text = user.phone_number or "не указан"
+
+            # Уведомляем сервис: клиент принял и дал номер
             await _notify_service_about_client_action(
                 callback.bot,
                 session,
                 request,
                 service_center,
-                text=f"✅ Клиент принял условия по заявке #{request.id}.",
+                text=(
+                    f"✅ Клиент принял условия по заявке #{request.id}.\n"
+                    f"📞 Телефон клиента: {phone_text}"
+                ),
             )
 
         except Exception as e:
             await session.rollback()
             logging.error(
-                f"❌ Ошибка при подтверждении условий клиентом для заявки #{request_id}: {e}"
+                f"❌ Ошибка при подтверждении условий (с номером) клиентом для заявки #{request_id}: {e}"
             )
             await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
             return
@@ -519,21 +774,23 @@ async def client_accept_offer(callback: CallbackQuery):
         await add_bonus(
             callback.from_user.id,
             "accept_offer",
-            description=f"Принятие условий по заявке #{request_id}",
+            description=f"Принятие условий с показом номера по заявке #{request_id}",
         )
     except Exception as bonus_err:
         logging.error(f"❌ Ошибка начисления бонуса за принятие условий: {bonus_err}")
 
-    # Сообщение клиенту
-    await callback.answer("✅ Вы приняли условия сервиса.", show_alert=True)
+    await callback.answer(
+        "✅ Вы приняли условия сервиса и отправили номер телефона менеджеру.",
+        show_alert=True,
+    )
 
-    # Убираем кнопки под сообщением клиента
+    # Убираем кнопки
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
 
-    # Обновляем карточку заявки в чате сервиса (кнопки)
+    # Обновляем карточку заявки в чате сервиса
     try:
         await update_chat_keyboard(callback.bot, request_id)
     except Exception as e:

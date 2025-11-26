@@ -136,6 +136,14 @@ def _format_request_text(
     car: Optional[Car],
     service_center: Optional[ServiceCenter] = None,
 ) -> str:
+    """
+    Формат карточки заявки для чата сервиса.
+
+    ВАЖНО:
+    - здесь НЕ показываем телефон и telegram-id клиента;
+    - контакт сервис получает только после явного согласия клиента
+      (отдельным сообщением из хендлеров offer_accept_*).
+    """
     car_block = "🚗 Автомобиль: не указан"
 
     if car:
@@ -162,7 +170,7 @@ def _format_request_text(
 
     if request.location_lat and request.location_lon:
         location_text = (
-            f"📍 Местоположение:\n"
+            "📍 Местоположение:\n"
             f"   • Координаты: {request.location_lat:.5f}, {request.location_lon:.5f}\n"
             f"   • Ссылка: https://maps.google.com/?q={request.location_lat:.5f},{request.location_lon:.5f}"
         )
@@ -180,9 +188,7 @@ def _format_request_text(
 
     text = (
         f"📋 Заявка #{request.id}\n\n"
-        f"👤 Клиент: {user.full_name or 'Не указано'}\n"
-        f"📞 Телефон: {user.phone_number or 'Не указан'}\n"
-        f"🆔 ID пользователя: {user.telegram_id}\n\n"
+        f"👤 Клиент: {user.full_name or 'Не указано'}\n\n"   # <- БЕЗ телефона и ID
         f"{car_block}\n\n"
         f"🛠️ Услуга: {request.service_type}\n\n"
         f"📝 Описание:\n{request.description}\n\n"
@@ -266,7 +272,7 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
             text = _format_request_text(request, user, car, service_center)
             keyboard = _build_chat_keyboard(request)
 
-            # 🔹 Добавляем к клавиатуре кнопку "Написать клиенту" с прямой ссылкой в ЛС
+            # Кнопка для менеджера: написать клиенту в Telegram (без показа номера)
             if user.telegram_id:
                 keyboard.inline_keyboard.append(
                     [
