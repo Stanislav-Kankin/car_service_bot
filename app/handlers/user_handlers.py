@@ -2686,138 +2686,175 @@ async def history_filter(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-async def show_requests_list(
-    callback: CallbackQuery,
-    filter_key: str = "all",
-    page: int = 1,
-):
+@router.callback_query(F.data.startswith("open_request:"))
+async def open_request(callback: CallbackQuery, state: FSMContext):
     """
-    Список заявок клиента с фильтрами по статусам и пагинацией.
+    Клиент открывает карточку своей заявки.
+    Показываем полную информацию + кнопку '📩 Написать в сервис'.
     """
-    if page < 1:
-        page = 1
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer("Некорректный ID заявки", show_alert=True)
+        return
 
     async with AsyncSessionLocal() as session:
-        try:
-            user_id = callback.from_user.id
+        result = await session.execute(
+            select(Request, ServiceCenter, Car)
+            .join(Car, Request.car_id == Car.id)
+            .outerjoin(ServiceCenter, Request.service_center_id == ServiceCenter.id)
+            .where(Request.id == request_id)
+        )
+        row = result.first()
 
-            user_result = await session.execute(
-                select(User).where(User.telegram_id == user_id)
+    if not row:
+        await callback.message.edit_text("❌ Заявка не найдена.", reply_markup=get_main_kb())
+        await callback.answer()
+        return
+
+    request, sc, car = row
+
+    # Формируем текст
+    status_map = {
+        "new": "🆕 Новая",
+        "offer_sent": "📨 Есть предложение от сервиса",
+        "accepted_by_client": "👍 Принята клиентом",
+        "accepted": "👌 Принята сервисом",
+        "in_progress": "🔧 В работе",
+        "completed": "🏁 Завершена",
+        "rejected": "❌ Отклонена",
+    }
+    status_text = status_map.get(request.status, request.status)
+
+    text_lines = [
+        f"📄 <b>Заявка #{request.id}</b>",
+        "",
+        f"🚗 Автомобиль: {car.brand} {car.model} ({car.year})",
+        f"🔧 Работы: {request.service_type}",
+        f"📝 Описание: {request.description}",
+        f"📷 Фото: {'Есть' if request.photo_file_id else 'Нет'}",
+        f"⏰ Удобное время: {request.preferred_date}",
+        "",
+        f"📍 Статус: <b>{status_text}</b>",
+    ]
+
+    if sc:
+        text_lines.append("")
+        text_lines.append(f"🏭 Сервис: <b>{sc.name}</b>")
+        text_lines.append(f"📍 Адрес: {sc.address or '—'}")
+        text_lines.append(f"☎️ Телефон скрыт (покажем после выбора сервиса)")
+
+    # ==== Клавиатура ====
+    kb = InlineKeyboardBuilder()
+
+    # Кнопка "Написать в сервис"
+    if sc and sc.owner_user_id:
+        async with AsyncSessionLocal() as session:
+            owner_res = await session.execute(
+                select(User).where(User.id == sc.owner_user_id)
             )
-            user = user_result.scalar_one_or_none()
+            owner = owner_res.scalar_one_or_none()
 
-            if not user:
-                await callback.message.edit_text("❌ Пользователь не найден. Начните с /start")
-                return
-
-            # Базовый фильтр по пользователю
-            base_filter = (Request.user_id == user.id)
-
-            # Статусы по выбранному фильтру
-            statuses = CLIENT_STATUS_FILTERS.get(filter_key)
-            if statuses is None and filter_key not in CLIENT_STATUS_FILTERS:
-                # неизвестный фильтр -> переключаемся на "all"
-                filter_key = "all"
-                statuses = CLIENT_STATUS_FILTERS["all"]
-
-            # Считаем общее количество заявок
-            count_stmt = select(func.count()).select_from(Request).where(base_filter)
-            if statuses:
-                count_stmt = count_stmt.where(Request.status.in_(statuses))
-
-            total = (await session.execute(count_stmt)).scalar() or 0
-            if total == 0:
-                if filter_key == "active":
-                    text = "📋 У вас нет активных заявок."
-                elif filter_key == "archived":
-                    text = "📁 У вас нет архивных заявок."
-                else:
-                    text = "📋 У вас пока нет заявок."
-
-                kb = _build_history_kb(filter_key, page=1, total_pages=1)
-                await callback.message.edit_text(text, reply_markup=kb)
-                return
-
-            total_pages = max(1, (total + CLIENT_PAGE_SIZE - 1) // CLIENT_PAGE_SIZE)
-            if page > total_pages:
-                page = total_pages
-
-            offset = (page - 1) * CLIENT_PAGE_SIZE
-
-            # Выбираем нужную страницу
-            query = (
-                select(Request)
-                .where(base_filter)
-                .order_by(Request.created_at.desc())
-            )
-            if statuses:
-                query = query.where(Request.status.in_(statuses))
-
-            query = query.offset(offset).limit(CLIENT_PAGE_SIZE)
-
-            result = await session.execute(query)
-            requests = result.scalars().all()
-
-            if not requests:
-                text = "📋 По данному фильтру заявок не найдено."
-                kb = _build_history_kb(filter_key, page=page, total_pages=total_pages)
-                await callback.message.edit_text(text, reply_markup=kb)
-                return
-
-            # Формируем текст
-            title = CLIENT_FILTER_TITLES.get(filter_key, "Мои заявки")
-            lines: list[str] = [f"📋 {title} (стр. {page}/{total_pages})", ""]
-
-            for req in requests:
-                status_emoji = {
-                    "new": "🆕",
-                    "offer_sent": "📨",
-                    "accepted_by_client": "✅",
-                    "accepted": "👍",
-                    "in_progress": "🔧",
-                    "completed": "🏁",
-                    "rejected": "❌",
-                }.get(req.status, "❔")
-
-                status_label = {
-                    "new": "Новая",
-                    "offer_sent": "Условия от сервиса",
-                    "accepted_by_client": "Принята клиентом",
-                    "accepted": "Принята сервисом",
-                    "in_progress": "В работе",
-                    "completed": "Завершена",
-                    "rejected": "Отклонена",
-                }.get(req.status, req.status)
-
-                created = (
-                    req.created_at.strftime("%d.%m.%Y %H:%M")
-                    if req.created_at
-                    else "—"
+        if owner and owner.telegram_id:
+            kb.row(
+                InlineKeyboardButton(
+                    text="📩 Написать в сервис",
+                    url=f"tg://user?id={owner.telegram_id}"
                 )
-                desc = (req.description or "").strip()
-                if len(desc) > 50:
-                    desc = desc[:50] + "…"
-
-                lines.append(
-                    f"{status_emoji} Заявка #{req.id}: {req.service_type}\n"
-                    f"   Статус: {status_label}\n"
-                    f"   Создана: {created}\n"
-                    f"   Описание: {desc}"
-                )
-                lines.append("")
-
-            kb = _build_history_kb(filter_key, page=page, total_pages=total_pages)
-
-            await callback.message.edit_text(
-                "\n".join(lines),
-                reply_markup=kb,
             )
-        except Exception as e:
-            logging.error(f"❌ Ошибка при загрузке списка заявок: {e}")
-            await callback.message.edit_text(
-                "❌ Ошибка при загрузке заявок. Попробуйте позже.",
-                reply_markup=get_main_kb()
+
+    kb.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data="my_requests"
+        )
+    )
+
+    await callback.message.edit_text(
+        "\n".join(text_lines),
+        parse_mode="HTML",
+        reply_markup=kb.as_markup()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("my_requests"))
+async def show_requests_list(callback: CallbackQuery, state: FSMContext):
+    """
+    Показывает клиенту его список заявок + кнопки открытия каждой заявки.
+    """
+    await state.clear()
+
+    async with AsyncSessionLocal() as session:
+        # Получаем пользователя
+        user_res = await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+        user = user_res.scalar_one_or_none()
+
+        if not user:
+            await callback.message.edit_text("❌ Пользователь не найден. Начните с /start")
+            return
+
+        # Получаем заявки
+        req_res = await session.execute(
+            select(Request)
+            .where(Request.user_id == user.id)
+            .order_by(Request.created_at.desc())
+        )
+        requests = req_res.scalars().all()
+
+    # Если заявок нет
+    if not requests:
+        await callback.message.edit_text(
+            "📋 У вас пока нет заявок.",
+            reply_markup=get_main_kb()
+        )
+        return
+
+    # Формируем текст
+    lines = ["📋 <b>Ваши заявки</b>\n"]
+    status_map = {
+        "new": "🆕 Новая",
+        "offer_sent": "📨 Есть предложение",
+        "accepted_by_client": "👍 Принята вами",
+        "accepted": "👌 Принята сервисом",
+        "in_progress": "🔧 В работе",
+        "completed": "🏁 Завершена",
+        "rejected": "❌ Отклонена",
+    }
+
+    for req in requests:
+        status_txt = status_map.get(req.status, req.status)
+        created = req.created_at.strftime("%d.%m.%Y %H:%M") if req.created_at else "—"
+        lines.append(
+            f"• <b>Заявка #{req.id}</b> — {status_txt}\n"
+            f"   Создана: {created}\n"
+        )
+
+    # ==== КНОПКИ ОТКРЫТИЯ КАЖДОЙ ЗАЯВКИ ====
+    kb = InlineKeyboardBuilder()
+    for req in requests:
+        kb.row(
+            InlineKeyboardButton(
+                text=f"🔍 Открыть заявку #{req.id}",
+                callback_data=f"open_request:{req.id}"
             )
+        )
+
+    # Кнопка назад
+    kb.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data="back_to_main"
+        )
+    )
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=kb.as_markup(),
+    )
 
 
 def _build_history_kb(filter_key: str, page: int, total_pages: int):

@@ -221,7 +221,9 @@ async def manager_offer_comment(message: Message, state: FSMContext):
     time_text = data.get("time")
 
     if not request_id or not price or not time_text:
-        await message.answer("❌ Состояние диалога потеряно. Попробуйте ещё раз с кнопки под заявкой.")
+        await message.answer(
+            "❌ Состояние диалога потеряно. Попробуйте ещё раз с кнопки под заявкой."
+        )
         await state.clear()
         return
 
@@ -257,27 +259,51 @@ async def manager_offer_comment(message: Message, state: FSMContext):
             request.status = "offer_sent"
             await session.commit()
 
-            # Отправляем клиенту условия
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
+            # Определяем контакт менеджера для кнопки связи
+            manager_telegram_id = None
+            if request.service_center_id:
+                sc_res = await session.execute(
+                    select(ServiceCenter).where(ServiceCenter.id == request.service_center_id)
+                )
+                sc = sc_res.scalar_one_or_none()
+                if sc and sc.owner_user_id:
+                    owner_res = await session.execute(
+                        select(User).where(User.id == sc.owner_user_id)
+                    )
+                    owner = owner_res.scalar_one_or_none()
+                    if owner and owner.telegram_id:
+                        manager_telegram_id = owner.telegram_id
+
+            # Кнопки для клиента: принять / отклонить + написать менеджеру
+            kb_rows = [
+                [
+                    InlineKeyboardButton(
+                        text="✅ Принять",
+                        callback_data=f"offer_accept:{request.id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Отклонить",
+                        callback_data=f"offer_reject:{request.id}",
+                    ),
+                ]
+            ]
+            if manager_telegram_id:
+                kb_rows.append(
                     [
                         InlineKeyboardButton(
-                            text="✅ Принять",
-                            callback_data=f"offer_accept:{request.id}",
-                        ),
-                        InlineKeyboardButton(
-                            text="❌ Отклонить",
-                            callback_data=f"offer_reject:{request.id}",
-                        ),
+                            text="💬 Написать менеджеру",
+                            url=f"tg://user?id={manager_telegram_id}",
+                        )
                     ]
-                ]
-            )
+                )
+
+            kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
             offer_text = (
                 f"📋 Ваша заявка #{request.id}\n\n"
                 f"🛠 Услуга: {request.service_type}\n\n"
                 f"💬 Условия от сервиса:\n{manager_comment}\n\n"
-                "Вы можете принять или отклонить эти условия:"
+                "Вы можете принять, отклонить эти условия или задать вопрос менеджеру:"
             )
 
             try:
