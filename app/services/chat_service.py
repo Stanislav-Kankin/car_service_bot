@@ -268,7 +268,6 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
 
             # 🔹 Добавляем к клавиатуре кнопку "Написать клиенту" с прямой ссылкой в ЛС
             if user.telegram_id:
-                # keyboard — это InlineKeyboardMarkup, у него есть .inline_keyboard (список рядов)
                 keyboard.inline_keyboard.append(
                     [
                         InlineKeyboardButton(
@@ -279,10 +278,13 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
                 )
 
             async def _send_to_chat(chat_id: int) -> Optional[int]:
+                """
+                Отправляет карточку заявки в указанный чат.
+                Если есть photo_file_id — пробуем отправить как фото с подписью.
+                При любой ошибке или отсутствии фото отправляем обычный текст.
+                """
                 msg = None
-                file_id = None
-                if request.photo_file_id:
-                    file_id = request.photo_file_id.split(",")[0].strip() or None
+                file_id = request.photo_file_id or None
 
                 if file_id:
                     try:
@@ -292,14 +294,15 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
                             caption=text,
                             reply_markup=keyboard,
                             parse_mode="HTML",
-                            link_preview_options=LinkPreviewOptions(is_disabled=True),
                         )
                     except Exception as e:
                         logging.error(
                             f"❌ Ошибка отправки фото в чат {chat_id} для заявки #{request_id}: {e}"
                         )
+                        msg = None
 
                 if msg is None:
+                    # Фоллбек на обычное сообщение
                     msg = await bot.send_message(
                         chat_id=chat_id,
                         text=text,
@@ -307,6 +310,7 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
                         parse_mode="HTML",
                         link_preview_options=LinkPreviewOptions(is_disabled=True),
                     )
+
                 return msg.message_id
 
             # Отправляем в основной канал
