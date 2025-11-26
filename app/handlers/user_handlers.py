@@ -32,12 +32,12 @@ from app.keyboards.main_kb import (
     get_service_types_kb, get_tire_subtypes_kb,
     get_electric_subtypes_kb, get_aggregates_subtypes_kb,
     get_photo_skip_kb, get_request_confirm_kb,
-    get_delete_confirm_kb, get_edit_cancel_kb,
+    get_delete_confirm_kb, get_history_kb, get_edit_cancel_kb,
     get_can_drive_kb, get_location_reply_kb, get_role_kb,
     get_manager_main_kb, get_service_notifications_kb,
     get_service_specializations_kb, get_reset_profile_kb,
     get_search_radius_kb,
-    get_time_slot_kb,  # 👈 добавить
+    get_time_slot_kb,
 )
 
 from app.config import config
@@ -1647,90 +1647,6 @@ async def process_preferred_date(message: Message, state: FSMContext):
     await state.set_state(RequestForm.preferred_time_slot)
 
 
-@router.callback_query(RequestForm.preferred_time_slot, F.data.startswith("time_slot:"))
-async def process_time_slot(callback: CallbackQuery, state: FSMContext):
-    """
-    Клиент выбирает удобный интервал времени: до 12, 12–18, после 18.
-    После выбора формируем текст заявки и переходим к подтверждению.
-    """
-    action = callback.data.split(":", 1)[1]
-
-    # Клиент хочет изменить дату — возвращаем на предыдущий шаг
-    if action == "change_date":
-        await callback.message.edit_text(
-            "⏰ Пожалуйста, напишите дату или период, когда вам удобно "
-            "выполнить работу:",
-            reply_markup=get_car_cancel_kb(),
-        )
-        await state.set_state(RequestForm.preferred_date)
-        await callback.answer()
-        return
-
-    slot_map = {
-        "morning": "до 12:00",
-        "day": "с 12:00 до 18:00",
-        "evening": "после 18:00",
-    }
-    slot_label = slot_map.get(action)
-    if not slot_label:
-        await callback.answer("Некорректный выбор времени", show_alert=True)
-        return
-
-    data = await state.get_data()
-    date_raw = data.get("preferred_date_raw", "").strip()
-
-    # Формируем финальный текст "дата + интервал"
-    if date_raw:
-        preferred = f"{date_raw}, {slot_label}"
-    else:
-        preferred = slot_label
-
-    # Кладём финальный текст туда, откуда его потом возьмёт создание заявки
-    await state.update_data(preferred_date=preferred)
-
-    service_type = data.get("service_type", "Не указано")
-    description = data.get("description", "Не указано")
-    photo_id = data.get("photo")
-    photos_text = "есть" if photo_id else "нет"
-
-    can_drive = data.get("can_drive")
-    if can_drive is True:
-        can_drive_text = "Да, может ехать сам"
-    elif can_drive is False:
-        can_drive_text = "Нет, требуется эвакуатор/перевозка"
-    else:
-        can_drive_text = "Не указано"
-
-    # Локация
-    location_lat = data.get("location_lat")
-    location_lon = data.get("location_lon")
-    location_description = data.get("location_description")
-
-    if location_lat and location_lon:
-        location_text = (
-            f"Координаты: {location_lat:.5f}, {location_lon:.5f}\n"
-            f"https://maps.google.com/?q={location_lat:.5f},{location_lon:.5f}"
-        )
-    elif location_description:
-        location_text = location_description
-    else:
-        location_text = "Не указано"
-
-    await callback.message.edit_text(
-        "📄 Заявка на услугу\n\n"
-        f"🔧 Услуга: {service_type}\n"
-        f"📝 Описание: {description}\n"
-        f"📷 Фото: {photos_text}\n"
-        f"🚚 Может ехать сам: {can_drive_text}\n"
-        f"📍 Местоположение: {location_text}\n"
-        f"⏰ Когда удобно: {preferred}\n\n"
-        "Подтвердите создание заявки:",
-        reply_markup=get_request_confirm_kb(),
-    )
-    await state.set_state(RequestForm.confirm)
-    await callback.answer()
-
-
 @router.message(CarForm.edit_model)
 async def process_edit_model(message: Message, state: FSMContext):
     new_model = message.text.strip()
@@ -1786,6 +1702,90 @@ async def process_edit_model(message: Message, state: FSMContext):
         data=f"select_car:{car_id}"
     )
     await select_car(fake_callback, state)
+
+
+@router.callback_query(RequestForm.preferred_time_slot, F.data.startswith("time_slot:"))
+async def process_time_slot(callback: CallbackQuery, state: FSMContext):
+    """
+    Клиент выбирает удобный интервал времени: до 12, 12–18, после 18.
+    После выбора формируем текст заявки и переходим к подтверждению.
+    """
+    action = callback.data.split(":", 1)[1]
+
+    # Клиент хочет изменить дату — возвращаем на предыдущий шаг
+    if action == "change_date":
+        await callback.message.edit_text(
+            "⏰ Пожалуйста, напишите дату или период, когда вам удобно "
+            "выполнить работу:",
+            reply_markup=get_car_cancel_kb(),
+        )
+        await state.set_state(RequestForm.preferred_date)
+        await callback.answer()
+        return
+
+    slot_map = {
+        "morning": "до 12:00",
+        "day": "с 12:00 до 18:00",
+        "evening": "после 18:00",
+    }
+    slot_label = slot_map.get(action)
+    if not slot_label:
+        await callback.answer("Некорректный выбор времени", show_alert=True)
+        return
+
+    data = await state.get_data()
+    date_raw = (data.get("preferred_date_raw") or "").strip()
+
+    # Формируем финальный текст "дата + интервал"
+    if date_raw:
+        preferred = f"{date_raw}, {slot_label}"
+    else:
+        preferred = slot_label
+
+    # Кладём финальный текст туда, откуда его потом возьмёт создание заявки
+    await state.update_data(preferred_date=preferred)
+
+    service_type = data.get("service_type", "Не указано")
+    description = data.get("description", "Не указано")
+    photo_id = data.get("photo")
+    photos_text = "есть" if photo_id else "нет"
+
+    can_drive = data.get("can_drive")
+    if can_drive is True:
+        can_drive_text = "Да, может ехать сам"
+    elif can_drive is False:
+        can_drive_text = "Нет, требуется эвакуатор/перевозка"
+    else:
+        can_drive_text = "Не указано"
+
+    # Локация
+    location_lat = data.get("location_lat")
+    location_lon = data.get("location_lon")
+    location_description = data.get("location_description")
+
+    if location_lat and location_lon:
+        location_text = (
+            f"Координаты: {location_lat:.5f}, {location_lon:.5f}\n"
+            f"https://maps.google.com/?q={location_lat:.5f},{location_lon:.5f}"
+        )
+    elif location_description:
+        location_text = location_description
+    else:
+        location_text = "Не указано"
+
+    await callback.message.edit_text(
+        "📄 Заявка на услугу\n\n"
+        f"🔧 Услуга: {service_type}\n"
+        f"📝 Описание: {description}\n"
+        f"📷 Фото: {photos_text}\n"
+        f"🚚 Может ехать сам: {can_drive_text}\n"
+        f"📍 Местоположение: {location_text}\n"
+        f"⏰ Когда удобно: {preferred}\n\n"
+        "Подтвердите создание заявки:",
+        reply_markup=get_request_confirm_kb(),
+    )
+    await state.set_state(RequestForm.confirm)
+    await callback.answer()
 
 
 @router.message(CarForm.edit_year)
@@ -2515,37 +2515,6 @@ async def process_can_drive(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(RequestForm.location)
     await callback.answer()
-
-
-@router.message(RequestForm.preferred_date)
-async def process_preferred_date(message: Message, state: FSMContext):
-    preferred = (message.text or "").strip()
-    if len(preferred) < 3:
-        await message.answer(
-            "❌ Слишком короткий ответ. Пожалуйста, укажите, когда вам удобно:",
-            reply_markup=get_car_cancel_kb(),
-        )
-        return
-
-    await state.update_data(preferred_date=preferred)
-    data = await state.get_data()
-
-    service_type = data.get("service_type", "Не указано")
-    description = data.get("description", "Не указано")
-    photo_id = data.get("photo")
-    photos_text = "есть" if photo_id else "нет"
-
-    await message.answer(
-        "📄 Заявка на услугу\n\n"
-        f"🚗 Авто: будет показано менеджеру по данным из гаража\n"
-        f"🔧 Услуга: {service_type}\n"
-        f"📝 Описание: {description}\n"
-        f"📷 Фото: {photos_text}\n"
-        f"⏰ Когда удобно: {preferred}\n\n"
-        "Подтвердите создание заявки:",
-        reply_markup=get_request_confirm_kb(),
-    )
-    await state.set_state(RequestForm.confirm)
 
 
 @router.callback_query(RequestForm.confirm, F.data == "confirm_request")

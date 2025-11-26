@@ -417,6 +417,39 @@ def get_location_reply_kb():
     )
 
 
+def get_time_slot_kb() -> InlineKeyboardMarkup:
+    """
+    Инлайн-клавиатура для выбора удобного времени:
+    до 12, 12–18, после 18.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="До 12:00",
+            callback_data="time_slot:morning",
+        ),
+        InlineKeyboardButton(
+            text="12:00–18:00",
+            callback_data="time_slot:day",
+        ),
+        InlineKeyboardButton(
+            text="После 18:00",
+            callback_data="time_slot:evening",
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🔁 Изменить дату",
+            callback_data="time_slot:change_date",
+        ),
+        InlineKeyboardButton(
+            text="❌ Отменить заявку",
+            callback_data="cancel_request",
+        ),
+    )
+    return builder.as_markup()
+
+
 def get_role_kb():
     """
     Выбор роли при регистрации: клиент или автосервис.
