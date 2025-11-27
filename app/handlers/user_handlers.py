@@ -370,8 +370,14 @@ async def process_new_phone(message: Message, state: FSMContext):
         await session.commit()
 
     await state.clear()
+
+    # ✅ Сначала убираем реплай-клавиатуру
     await message.answer(
-        "✅ Номер телефона обновлён.\n\n"
+        "✅ Номер телефона обновлён.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    # Потом показываем главное меню
+    await message.answer(
         "Главное меню:",
         reply_markup=get_main_kb(),
     )
@@ -610,6 +616,12 @@ async def process_service_location_geo(message: Message, state: FSMContext):
         service_location_lon=loc.longitude,
     )
 
+    # ✅ Убираем клавиатуру с гео
+    await message.answer(
+        "✅ Локация сервиса получена.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
     await message.answer(
         "Отлично! Теперь выберите, <b>какие виды работ вы выполняете</b>.\n\n"
         "Можно выбрать несколько пунктов, нажимая на них.\n"
@@ -643,6 +655,12 @@ async def process_service_location_text(message: Message, state: FSMContext):
             service_location_lat=None,
             service_location_lon=None,
         )
+
+    # ✅ Убираем клавиатуру с гео / текстом
+    await message.answer(
+        "✅ Локация сервиса сохранена.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
     await message.answer(
         "Отлично! Теперь выберите, <b>какие виды работ вы выполняете</b>.\n\n"
@@ -749,11 +767,14 @@ async def skip_service_specializations(callback: CallbackQuery, state: FSMContex
 @router.message(Registration.phone)
 async def process_phone_registration(message: Message, state: FSMContext):
     """
-    Завершение шага регистрации: получение телефона, создание/обновление User
-    и, при необходимости, ServiceCenter (для роли service).
+    Завершение шага регистрации:
+    - получаем телефон (контакт),
+    - создаём/обновляем User,
+    - при необходимости создаём/обновляем ServiceCenter,
+    - коммитим всё одной транзакцией.
     """
-    # На всякий случай — защита, если вдруг прилетит не контакт
-    if not message.contact:
+    # Должен прийти именно контакт
+    if not message.contact or not message.contact.phone_number:
         await message.answer(
             "📱 Пожалуйста, используйте кнопку для отправки номера телефона:",
             reply_markup=get_phone_reply_kb(),
@@ -762,6 +783,12 @@ async def process_phone_registration(message: Message, state: FSMContext):
 
     phone_number = message.contact.phone_number
 
+    # Сразу убираем клавиатуру с номером
+    await message.answer(
+        "✅ Номер телефона получен.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
     data = await state.get_data()
     name = data.get("name") or (message.from_user.full_name or "").strip() or "Без имени"
     role = data.get("role") or "client"
@@ -769,13 +796,13 @@ async def process_phone_registration(message: Message, state: FSMContext):
     service_address = data.get("service_address")
     service_specializations = data.get("service_specializations")  # может быть None/список
 
-    # 🔹 новые поля — координаты сервиса
+    # Координаты сервиса (если проходили шаг гео)
     service_location_lat = data.get("service_location_lat")
     service_location_lon = data.get("service_location_lon")
 
     async with AsyncSessionLocal() as session:
         try:
-            # Ищем пользователя по telegram_id
+            # --- 1. Находим или создаём пользователя ---
             result = await session.execute(
                 select(User).where(User.telegram_id == message.from_user.id)
             )
@@ -783,7 +810,7 @@ async def process_phone_registration(message: Message, state: FSMContext):
             is_new_user = user is None
 
             if user:
-                # Обновляем данные существующего пользователя
+                # Обновляем существующего
                 user.full_name = name
                 user.phone_number = phone_number
                 user.role = role
@@ -794,7 +821,7 @@ async def process_phone_registration(message: Message, state: FSMContext):
                     user.service_name = None
                     user.service_address = None
             else:
-                # Создаём нового пользователя
+                # Создаём нового
                 user = User(
                     telegram_id=message.from_user.id,
                     full_name=name,
@@ -805,11 +832,9 @@ async def process_phone_registration(message: Message, state: FSMContext):
                 )
                 session.add(user)
 
-            await session.commit()
-            await session.refresh(user)
-
-            # 🔗 Если это автосервис — создаём (или находим) ServiceCenter
             service_center_id: int | None = None
+
+            # --- 2. Если это автосервис — создаём/обновляем ServiceCenter ---
             if role == "service":
                 sc_result = await session.execute(
                     select(ServiceCenter).where(ServiceCenter.owner_user_id == user.id)
@@ -817,29 +842,23 @@ async def process_phone_registration(message: Message, state: FSMContext):
                 service_center: ServiceCenter | None = sc_result.scalar_one_or_none()
 
                 if not service_center:
-                    # создаём новый сервис
                     service_center = ServiceCenter(
                         name=user.service_name or user.full_name,
                         address=user.service_address,
                         phone=user.phone_number,
                         owner_user_id=user.id,
-                        # координаты сервиса (могут быть None, если шаг пропустили)
                         location_lat=service_location_lat,
                         location_lon=service_location_lon,
-                        # по умолчанию — заявки идут в ЛС,
-                        # дальше на шаге уведомлений/группы настраиваем
                         send_to_owner=True,
                         send_to_group=False,
                         manager_chat_id=None,
                     )
                     session.add(service_center)
                 else:
-                    # обновляем базовые данные существующего сервиса
                     service_center.name = user.service_name or user.full_name
                     service_center.address = user.service_address
                     service_center.phone = user.phone_number
 
-                    # обновляем координаты, если в этот раз их прислали
                     if (
                         service_location_lat is not None
                         and service_location_lon is not None
@@ -847,19 +866,21 @@ async def process_phone_registration(message: Message, state: FSMContext):
                         service_center.location_lat = service_location_lat
                         service_center.location_lon = service_location_lon
 
-                # Обновляем специализации, если шаг проходили
+                # Специализации сервиса
                 if service_specializations is not None:
                     if service_specializations:
-                        # список кодов → строка "wash,tire,agg_turbo"
                         service_center.specializations = ",".join(service_specializations)
                     else:
-                        # пустой список → трактуем как «универсальный сервис»
                         service_center.specializations = None
 
-                await session.commit()
+            # --- 3. Один общий коммит ---
+            await session.commit()
+
+            # Обновляем объекты в памяти
+            await session.refresh(user)
+            if role == "service":
                 await session.refresh(service_center)
                 service_center_id = service_center.id
-
                 logging.info(
                     f"✅ Зарегистрирован/обновлён автосервис для пользователя {message.from_user.id} "
                     f"(ServiceCenter id={service_center.id}, "
@@ -877,15 +898,14 @@ async def process_phone_registration(message: Message, state: FSMContext):
             logging.error(f"❌ Ошибка при сохранении регистрации: {e}")
             await message.answer(
                 "❌ Произошла ошибка при сохранении данных. Попробуйте позже.",
-                reply_markup=ReplyKeyboardRemove(),
             )
             await state.clear()
             return
 
-    # Сохраняем в FSM на всякий случай (может пригодиться дальше)
+    # Сохраняем id в FSM (на всякий случай)
     await state.update_data(user_id=user.id, service_center_id=service_center_id)
 
-    # Бонус за регистрацию — только для НОВОГО пользователя
+    # --- 4. Бонус за регистрацию только для новых ---
     if is_new_user:
         try:
             await add_bonus(
@@ -896,9 +916,8 @@ async def process_phone_registration(message: Message, state: FSMContext):
         except Exception as bonus_err:
             logging.error(f"❌ Ошибка начисления бонуса за регистрацию: {bonus_err}")
 
-    # Дальше логика развилки по роли
+    # --- 5. Продолжение сценария в зависимости от роли ---
     if role == "service":
-        # Идём на шаг выбора, куда слать заявки (ЛС / группа / ЛС+группа)
         await message.answer(
             "📨 Куда вам удобнее получать заявки от клиентов?\n\n"
             "Выберите вариант ниже:",
@@ -906,18 +925,12 @@ async def process_phone_registration(message: Message, state: FSMContext):
         )
         await state.set_state(Registration.notifications)
     else:
-        # Обычный клиент — завершаем регистрацию и показываем главное меню
-        text = (
-            "✅ Регистрация завершена!\n\n"
-            "Вы зарегистрированы как <b>клиент</b>. "
-            "Теперь можете добавить автомобиль и создать заявку."
-        )
+        # Клиент — регистрация завершена
+        await state.clear()
         await message.answer(
-            text,
-            parse_mode="HTML",
+            "✅ Регистрация завершена.\n\nГлавное меню:",
             reply_markup=get_main_kb(),
         )
-        await state.clear()
 
 
 # Обработчик нажатия на "Мой гараж"
@@ -2497,9 +2510,28 @@ async def skip_photo(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(RequestForm.can_drive, F.data.in_(["can_drive_yes", "can_drive_no"]))
 async def process_can_drive(callback: CallbackQuery, state: FSMContext):
+    """
+    Обработка ответа на вопрос:
+    Может ли автомобиль передвигаться своим ходом.
+
+    ✅ Если ДА — не спрашиваем гео, сразу идём к вопросу "Когда удобно?".
+    ❌ Если НЕТ — спрашиваем геолокацию/адрес (эвакуатор / выездной мастер).
+    """
     can_drive = callback.data == "can_drive_yes"
     await state.update_data(can_drive=can_drive)
 
+    if can_drive:
+        # Машина может ехать сама — гео не спрашиваем
+        await callback.message.edit_text(
+            "✅ Понял, автомобиль может передвигаться своим ходом.\n\n"
+            "⏰ Когда вам удобно выполнить работу?\n"
+            "Напишите удобное время в свободной форме (например, «Сегодня после 18:00»).",
+        )
+        await state.set_state(RequestForm.preferred_date)
+        await callback.answer()
+        return
+
+    # Машина НЕ может ехать — спрашиваем местоположение
     text = (
         "📍 Теперь укажем текущее местоположение автомобиля.\n\n"
         "Вы можете:\n"
@@ -2810,42 +2842,76 @@ async def open_request(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("my_requests"))
-async def show_requests_list(callback: CallbackQuery, state: FSMContext):
+async def show_requests_list(
+    callback: CallbackQuery,
+    filter_key: str = "all",
+    page: int = 1,
+):
     """
-    Показывает клиенту его список заявок + кнопки открытия каждой заявки.
+    Список заявок клиента с учётом фильтра и пагинации.
+
+    Используется хендлерами:
+      - my_requests
+      - history_active
+      - history_archived
+      - history_filter
     """
-    await state.clear()
+    if page < 1:
+        page = 1
+
+    # Проверяем фильтр
+    if filter_key not in CLIENT_STATUS_FILTERS:
+        filter_key = "all"
+
+    status_filter = CLIENT_STATUS_FILTERS[filter_key]
 
     async with AsyncSessionLocal() as session:
-        # Получаем пользователя
+        # 1. Находим пользователя
         user_res = await session.execute(
             select(User).where(User.telegram_id == callback.from_user.id)
         )
         user = user_res.scalar_one_or_none()
 
         if not user:
-            await callback.message.edit_text("❌ Пользователь не найден. Начните с /start")
+            await callback.message.edit_text(
+                "❌ Пользователь не найден. Начните с /start"
+            )
+            await callback.answer()
             return
 
-        # Получаем заявки
+        # 2. Загружаем ВСЕ его заявки + привязанное авто
         req_res = await session.execute(
-            select(Request)
+            select(Request, Car)
+            .join(Car, Request.car_id == Car.id, isouter=True)
             .where(Request.user_id == user.id)
             .order_by(Request.created_at.desc())
         )
-        requests = req_res.scalars().all()
+        rows = req_res.all()
 
-    # Если заявок нет
-    if not requests:
+    # Фильтруем по статусу в Python, чтобы не тянуть func/count и т.п.
+    if status_filter:
+        rows = [row for row in rows if row[0].status in status_filter]
+
+    total = len(rows)
+    if total == 0:
+        title = CLIENT_FILTER_TITLES.get(filter_key, "Заявки")
         await callback.message.edit_text(
-            "📋 У вас пока нет заявок.",
-            reply_markup=get_main_kb()
+            f"📋 <b>{title}</b>\n\n"
+            "По данному фильтру у вас пока нет заявок.",
+            parse_mode="HTML",
+            reply_markup=_build_history_kb(filter_key, 1, 1),
         )
+        await callback.answer()
         return
 
-    # Формируем текст
-    lines = ["📋 <b>Ваши заявки</b>\n"]
+    total_pages = max(1, (total + CLIENT_PAGE_SIZE - 1) // CLIENT_PAGE_SIZE)
+    if page > total_pages:
+        page = total_pages
+
+    start = (page - 1) * CLIENT_PAGE_SIZE
+    end = start + CLIENT_PAGE_SIZE
+    page_rows = rows[start:end]
+
     status_map = {
         "new": "🆕 Новая",
         "offer_sent": "📨 Есть предложение",
@@ -2856,37 +2922,66 @@ async def show_requests_list(callback: CallbackQuery, state: FSMContext):
         "rejected": "❌ Отклонена",
     }
 
-    for req in requests:
+    title = CLIENT_FILTER_TITLES.get(filter_key, "Заявки")
+    lines: list[str] = [
+        f"📋 <b>{title}</b> (стр. {page}/{total_pages})",
+        "",
+    ]
+
+    for req, car in page_rows:
         status_txt = status_map.get(req.status, req.status)
-        created = req.created_at.strftime("%d.%m.%Y %H:%M") if req.created_at else "—"
-        lines.append(
-            f"• <b>Заявка #{req.id}</b> — {status_txt}\n"
-            f"   Создана: {created}\n"
+
+        created = (
+            req.created_at.strftime("%d.%m.%Y %H:%M") if req.created_at else "—"
         )
 
-    # ==== КНОПКИ ОТКРЫТИЯ КАЖДОЙ ЗАЯВКИ ====
-    kb = InlineKeyboardBuilder()
-    for req in requests:
-        kb.row(
+        if car:
+            car_str_parts = [
+                p
+                for p in [
+                    car.brand,
+                    car.model,
+                    str(car.year) if car.year else None,
+                    car.license_plate,
+                ]
+                if p
+            ]
+            car_str = " ".join(car_str_parts) if car_str_parts else "Авто"
+        else:
+            car_str = "Авто не указано"
+
+        lines.append(
+            f"• <b>Заявка #{req.id}</b> — {status_txt}\n"
+            f"   🚗 {car_str}\n"
+            f"   🕒 {created}\n"
+        )
+
+    # Кнопки: открыть заявку + фильтры/пагинация
+    base_kb = InlineKeyboardBuilder()
+    for req, _car in page_rows:
+        base_kb.row(
             InlineKeyboardButton(
                 text=f"🔍 Открыть заявку #{req.id}",
-                callback_data=f"open_request:{req.id}"
+                callback_data=f"open_request:{req.id}",
             )
         )
 
-    # Кнопка назад
-    kb.row(
-        InlineKeyboardButton(
-            text="⬅️ Назад",
-            callback_data="back_to_main"
-        )
-    )
+    # Склеиваем с навигацией по фильтрам/страницам
+    nav_kb = _build_history_kb(filter_key, page, total_pages)
+
+    # Соберём итоговую клавиатуру: сначала кнопки заявок, потом фильтры/страницы
+    full_kb = InlineKeyboardBuilder()
+    for row in base_kb.as_markup().inline_keyboard:
+        full_kb.row(*row)
+    for row in nav_kb.inline_keyboard:
+        full_kb.row(*row)
 
     await callback.message.edit_text(
         "\n".join(lines),
         parse_mode="HTML",
-        reply_markup=kb.as_markup(),
+        reply_markup=full_kb.as_markup(),
     )
+    await callback.answer()
 
 
 def _build_history_kb(filter_key: str, page: int, total_pages: int):
@@ -3422,6 +3517,12 @@ async def search_services_by_geo(message: Message, state: FSMContext):
     user_lat = loc.latitude
     user_lon = loc.longitude
 
+    # ✅ Убираем клавиатуру с гео
+    await message.answer(
+        "✅ Геолокация получена, ищу подходящие сервисы...",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
     data = await state.get_data()
     radius = data.get("radius", 10)
 
@@ -3552,6 +3653,11 @@ async def service_search_location(message: Message, state: FSMContext):
         await state.update_data(
             search_lat=loc.latitude,
             search_lon=loc.longitude,
+        )
+        # ✅ убираем клавиатуру
+        await message.answer(
+            "✅ Геолокация получена.",
+            reply_markup=ReplyKeyboardRemove(),
         )
         await message.answer(
             "Выберите радиус поиска автосервисов:",
