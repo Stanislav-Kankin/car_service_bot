@@ -66,6 +66,10 @@ class RequestForm(StatesGroup):
     # Шаг выбора автосервиса из подходящих
     service_center = State()
 
+    # Внутренний под-диалог "Найти ближайший" внутри заявки
+    nearest_radius = State()
+    nearest_location = State()
+
     # Основной тип услуги (группа работ)
     service_type = State()
     # Уточняющий тип/подтип услуги внутри группы
@@ -1592,6 +1596,9 @@ async def process_edit_brand(message: Message, state: FSMContext):
 #  Обработчик геолокации
 @router.message(RequestForm.location, F.location)
 async def process_location_geo(message: Message, state: FSMContext):
+    """
+    Пользователь отправил геолокацию для заявки (ветка, где авто не может ехать).
+    """
     loc = message.location
     await state.update_data(
         location_lat=loc.latitude,
@@ -1602,7 +1609,7 @@ async def process_location_geo(message: Message, state: FSMContext):
     await message.answer(
         "✅ Местоположение получено.\n\n"
         "⏰ Теперь укажите, когда вам удобно выполнить работу.\n"
-        "Напишите удобное время в свободной форме (например, «Сегодня после 18:00»).",
+        "Напишите удобную дату или период (например, «Сегодня», «Завтра после 18:00»).",
         reply_markup=ReplyKeyboardRemove(),
     )
     await state.set_state(RequestForm.preferred_date)
@@ -1610,10 +1617,14 @@ async def process_location_geo(message: Message, state: FSMContext):
 
 @router.message(RequestForm.location)
 async def process_location_text(message: Message, state: FSMContext):
-    text = (message.text or "").strip()
+    """
+    Пользователь ввёл местоположение текстом или решил пропустить.
+    Эта ветка используется в сценарии, когда авто НЕ может ехать само.
+    """
+    text = (message.text or "").strip().lower()
 
     # Пропуск локации
-    if text.lower().startswith("⏭️".lower()) or "пропустить" in text.lower():
+    if text.startswith("⏭️") or "пропустить" in text:
         await state.update_data(
             location_lat=None,
             location_lon=None,
@@ -1624,12 +1635,12 @@ async def process_location_text(message: Message, state: FSMContext):
         await state.update_data(
             location_lat=None,
             location_lon=None,
-            location_description=text,
+            location_description=(message.text or "").strip(),
         )
 
     await message.answer(
         "⏰ Когда вам удобно выполнить работу?\n\n"
-        "Напишите удобное время в свободной форме (например, «Сегодня после 18:00»).",
+        "Напишите удобную дату или период (например, «Сегодня», «Завтра после 18:00»).",
         reply_markup=ReplyKeyboardRemove(),
     )
     await state.set_state(RequestForm.preferred_date)
@@ -1639,18 +1650,20 @@ async def process_location_text(message: Message, state: FSMContext):
 @router.message(RequestForm.preferred_date)
 async def process_preferred_date(message: Message, state: FSMContext):
     """
-    Шаг выбора даты. Затем предложим выбрать интервал времени отдельно.
+    Шаг выбора даты/периода.
+    Затем предложим выбрать интервал времени отдельной инлайн-клавиатурой.
     """
     date_text = (message.text or "").strip()
+
     if len(date_text) < 3:
         await message.answer(
-            "❌ Слишком короткий ответ. Пожалуйста, укажите дату или период, "
-            "когда вам удобно выполнить работу:",
-            reply_markup=get_car_cancel_kb(),
+            "❌ Слишком короткий ответ.\n"
+            "Пожалуйста, укажите дату или период, когда вам удобно выполнить работу "
+            "(например, «Сегодня после 18:00», «Завтра утром», «В субботу»)."
         )
         return
 
-    # Сохраняем сырую дату, а интервал времени выберем следующей кнопкой
+    # Сохраняем сырой текст даты
     await state.update_data(preferred_date_raw=date_text)
 
     await message.answer(
@@ -2202,12 +2215,19 @@ async def _ask_service_center_for_request(callback: CallbackQuery, state: FSMCon
     Шаг выбора автосервиса после того, как:
     - выбран автомобиль
     - выбран тип/подтип работы (category_code)
+
+    Новая логика:
+    - Показываем список подходящих СТО с адресом и рейтингом в тексте кнопки.
+    - Добавляем:
+        • 📤 Отправить всем подходящим
+        • 🔍 Найти ближайший (пока заглушка)
     """
     data = await state.get_data()
     category_code = data.get("category_code")
+    can_drive = data.get("can_drive")  # может пригодиться дальше
 
     async with AsyncSessionLocal() as session:
-        # Если category_code не указан (на всякий случай) — берём все активные сервисы
+        # Базовый запрос: только активные СТО (есть владелец)
         base_query = select(ServiceCenter).where(ServiceCenter.owner_user_id.isnot(None))
 
         if category_code:
@@ -2220,11 +2240,17 @@ async def _ask_service_center_for_request(callback: CallbackQuery, state: FSMCon
                 | (ServiceCenter.specializations.is_(None))
             )
 
-        result = await session.execute(base_query.order_by(ServiceCenter.id.desc()))
+        # Упорядочим по рейтингу (сначала самые высокие), потом по id
+        base_query = base_query.order_by(
+            ServiceCenter.rating.desc().nullslast(),
+            ServiceCenter.id.desc(),
+        )
+
+        result = await session.execute(base_query)
         services = result.scalars().all()
 
+    # Если подходящих нет — позволяем создать заявку без привязки к СТО
     if not services:
-        # Нет подходящих сервисов — даём пользователю продолжить без выбора СТО
         await callback.message.edit_text(
             "❌ Подходящих автосервисов сейчас не найдено.\n\n"
             "Но вы всё равно можете создать заявку — менеджеры увидят её в общем списке.\n\n"
@@ -2236,13 +2262,20 @@ async def _ask_service_center_for_request(callback: CallbackQuery, state: FSMCon
         await callback.answer()
         return
 
+    # Если один подходящий сервис — сразу выбираем его, но говорим об этом пользователю
     if len(services) == 1:
-        # Один подходящий сервис — сразу выбираем его
         service = services[0]
         await state.update_data(service_center_id=service.id)
 
+        rating_text = ""
+        if service.ratings_count and service.ratings_count > 0:
+            rating_text = f" (⭐ {service.rating:.1f} на основе {service.ratings_count} оценок)"
+
         await callback.message.edit_text(
-            f"🏭 Выбран автосервис: <b>{service.name}</b>\n\n"
+            f"🏭 Автосервис для заявки выбран автоматически:\n\n"
+            f"<b>{service.name}</b>\n"
+            f"📍 {service.address or 'Адрес не указан'}\n"
+            f"{rating_text}\n\n"
             "Теперь опишите, пожалуйста, проблему с автомобилем:",
             parse_mode="HTML",
         )
@@ -2250,23 +2283,286 @@ async def _ask_service_center_for_request(callback: CallbackQuery, state: FSMCon
         await callback.answer()
         return
 
-    # Несколько СТО — показываем список
+    # Несколько подходящих СТО — показываем список
     builder = InlineKeyboardBuilder()
+
     for sc in services:
-        title = sc.name
+        title_parts: list[str] = []
+
+        # Название
+        title_parts.append(sc.name)
+
+        # Рейтинг
+        if sc.ratings_count and sc.ratings_count > 0:
+            title_parts.append(f"⭐ {sc.rating:.1f}")
+
+        # Короткий адрес
         if sc.address:
-            title += f" — {sc.address}"
-        builder.button(
-            text=title,
-            callback_data=f"select_sc_for_request:{sc.id}",
+            # Чтобы не раздувать кнопку, обрежем адрес, если он очень длинный
+            short_addr = sc.address.strip()
+            if len(short_addr) > 40:
+                short_addr = short_addr[:37] + "…"
+            title_parts.append(short_addr)
+
+        button_text = " | ".join(title_parts)
+
+        builder.row(
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"select_sc_for_request:{sc.id}",
+            )
         )
-    builder.adjust(1)
+
+    # Дополнительные опции
+    builder.row(
+        InlineKeyboardButton(
+            text="📤 Отправить всем подходящим",
+            callback_data="request_send_to_all",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🔍 Найти ближайший",
+            callback_data="request_find_nearby",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="❌ Отменить",
+            callback_data="cancel_request",
+        )
+    )
 
     await callback.message.edit_text(
-        "🏭 Выберите автосервис, который будет выполнять работы:",
+        "🏭 Выберите автосервис, который будет выполнять работы:\n\n"
+        "• Нажмите на сервис из списка (видно название, рейтинг и адрес);\n"
+        "• или используйте «📤 Отправить всем подходящим»;\n"
+        "• в следующей итерации добавим полноценный поиск ближайшего по геолокации.",
         reply_markup=builder.as_markup(),
+        parse_mode="HTML",
     )
     await state.set_state(RequestForm.service_center)
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.service_center, F.data == "request_find_nearby")
+async def request_find_nearby(callback: CallbackQuery, state: FSMContext):
+    """
+    Пользователь нажал '🔍 Найти ближайший' внутри процесса создания заявки.
+    Шаг 1: спрашиваем радиус поиска.
+    """
+    await callback.message.edit_text(
+        "🌍 Чтобы найти ближайшие СТО, сначала выберите радиус поиска:",
+        reply_markup=get_search_radius_kb(),
+    )
+    # Переходим в под-состояние выбора радиуса (в контексте заявки)
+    await state.set_state(RequestForm.nearest_radius)
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.nearest_radius, F.data.startswith("radius:"))
+async def request_nearest_radius(callback: CallbackQuery, state: FSMContext):
+    """
+    Шаг 2: выбран радиус (из get_search_radius_kb),
+    дальше попросим геолокацию пользователя.
+    """
+    try:
+        radius_km = float(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Не удалось понять радиус 😕", show_alert=True)
+        return
+
+    # Сохраняем радиус в состоянии
+    await state.update_data(nearest_radius_km=radius_km)
+
+    await callback.message.edit_text(
+        "📍 Теперь отправьте геолокацию автомобиля,\n"
+        "чтобы мы нашли ближайшие подходящие СТО.",
+    )
+    await callback.message.answer(
+        "Нажмите кнопку ниже, чтобы отправить геолокацию:",
+        reply_markup=get_location_reply_kb(),
+    )
+
+    await state.set_state(RequestForm.nearest_location)
+    await callback.answer()
+
+@router.message(RequestForm.nearest_location)
+async def request_nearest_location(message: Message, state: FSMContext):
+    """
+    Шаг 3: получаем геолокацию, считаем расстояния и показываем
+    ближайшие СТО для выбора в рамках текущей заявки.
+    """
+    # Пользователь должен отправить гео
+    if not message.location:
+        text = (message.text or "").strip().lower()
+        if "отмена" in text or "cancel" in text:
+            # Отмена поиска ближайших — возвращаемся к обычному списку СТО
+            await message.answer(
+                "Поиск ближайших сервисов отменён.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            await _ask_service_center_for_request_from_message(message, state)
+            return
+
+        await message.answer(
+            "Пожалуйста, отправьте геолокацию через кнопку "
+            "«📍 Отправить геолокацию» внизу экрана.\n"
+            "Или напишите «отмена» для возврата к списку сервисов."
+        )
+        return
+
+    # Геолокация есть
+    loc = message.location
+    user_lat = loc.latitude
+    user_lon = loc.longitude
+
+    data = await state.get_data()
+    radius_km = float(data.get("nearest_radius_km", 10))
+    category_code = data.get("category_code")
+
+    async with AsyncSessionLocal() as session:
+        # Берём только "живые" сервисы, у которых есть владелец и координаты
+        query = select(ServiceCenter).where(
+            ServiceCenter.owner_user_id.isnot(None),
+            ServiceCenter.location_lat.is_not(None),
+            ServiceCenter.location_lon.is_not(None),
+        )
+
+        if category_code:
+            spec_like = f"%{category_code}%"
+            query = query.where(
+                (ServiceCenter.specializations.ilike(spec_like))
+                | (ServiceCenter.specializations.is_(None))
+            )
+
+        result = await session.execute(query)
+        services = result.scalars().all()
+
+    nearby: list[tuple[ServiceCenter, float]] = []
+    for sc in services:
+        dist = _haversine_km(user_lat, user_lon, sc.location_lat, sc.location_lon)
+        if dist <= radius_km:
+            nearby.append((sc, dist))
+
+    nearby.sort(key=lambda x: x[1])
+
+    # Убираем реплай-клавиатуру с гео
+    await message.answer("Спасибо, локация получена ✅", reply_markup=ReplyKeyboardRemove())
+
+    # Если в радиусе никого нет — предлагаем альтернативы
+    if not nearby:
+        kb = InlineKeyboardBuilder()
+        kb.row(
+            InlineKeyboardButton(
+                text="📤 Отправить всем подходящим",
+                callback_data="request_send_to_all",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text="📋 Показать весь список сервисов",
+                callback_data="request_back_to_service_list",
+            )
+        )
+
+        await message.answer(
+            f"😔 В радиусе {radius_km:.0f} км подходящих СТО не найдено.\n\n"
+            "Вы можете:\n"
+            "• отправить заявку всем подходящим сервисам;\n"
+            "• или вернуться к полному списку СТО.",
+            reply_markup=kb.as_markup(),
+        )
+
+        # Возвращаемся к состоянию выбора сервиса
+        await state.set_state(RequestForm.service_center)
+        return
+
+    # Есть хотя бы один сервис в радиусе — показываем список
+    lines = [f"🏭 <b>Сервисы рядом с вами (до {radius_km:.0f} км)</b>\n"]
+    kb = InlineKeyboardBuilder()
+
+    for sc, dist in nearby:
+        parts = [sc.name]
+
+        # Добавим рейтинг, если есть
+        if sc.ratings_count and sc.ratings_count > 0:
+            parts.append(f"⭐ {sc.rating:.1f}")
+
+        parts.append(f"{dist:.1f} км")
+
+        # Короткий адрес
+        if sc.address:
+            short_addr = sc.address.strip()
+            if len(short_addr) > 40:
+                short_addr = short_addr[:37] + "…"
+            parts.append(short_addr)
+
+        btn_text = " | ".join(parts)
+        kb.row(
+            InlineKeyboardButton(
+                text=btn_text,
+                callback_data=f"select_sc_for_request:{sc.id}",
+            )
+        )
+        lines.append(f"• <b>{sc.name}</b> — {dist:.1f} км")
+
+    kb.row(
+        InlineKeyboardButton(
+            text="📤 Отправить всем подходящим",
+            callback_data="request_send_to_all",
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="⬅️ К полному списку",
+            callback_data="request_back_to_service_list",
+        )
+    )
+
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=kb.as_markup(),
+    )
+
+    # Возвращаемся к состоянию выбора сервиса (дальше сработает select_sc_for_request)
+    await state.set_state(RequestForm.service_center)
+
+
+async def _ask_service_center_for_request_from_message(message: Message, state: FSMContext):
+    """
+    Обёртка над _ask_service_center_for_request, когда мы в контексте Message,
+    а не CallbackQuery (например, после отмены поиска ближайших).
+    """
+    fake_callback = CallbackQuery(
+        id="0",
+        from_user=message.from_user,
+        chat_instance="",
+        message=message,
+        data="",
+    )
+    await _ask_service_center_for_request(fake_callback, state)
+
+
+@router.callback_query(RequestForm.service_center, F.data == "request_send_to_all")
+async def request_send_to_all(callback: CallbackQuery, state: FSMContext):
+    """
+    Пользователь выбрал вариант 'Отправить всем подходящим'.
+    Логика:
+    - Явно НЕ привязываем заявку к конкретному СТО (service_center_id = None).
+    - Созданная заявка уйдёт в общий менеджерский канал / MANAGER_CHAT_ID.
+    """
+    # Явно обнуляем привязку к конкретному сервису
+    await state.update_data(service_center_id=None, send_mode="all")
+
+    await callback.message.edit_text(
+        "📤 Заявка будет отправлена всем подходящим автосервисам.\n\n"
+        "Теперь опишите, пожалуйста, проблему с автомобилем как можно подробнее:\n"
+        "что случилось, при каких условиях проявляется, были ли уже ремонты и т.п.",
+        reply_markup=None,
+    )
+    await state.set_state(RequestForm.description)
     await callback.answer()
 
 
@@ -2304,6 +2600,62 @@ async def select_car_for_request(callback: CallbackQuery, state: FSMContext):
 
     # Дальше — единый шаг выбора вида работ
     await _start_request_service_type_step(callback, state)
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.service_center, F.data.startswith("select_sc_for_request:"))
+async def select_sc_for_request(callback: CallbackQuery, state: FSMContext):
+    """
+    Пользователь выбрал конкретный автосервис для заявки.
+    """
+    try:
+        sc_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ServiceCenter).where(
+                ServiceCenter.id == sc_id,
+                ServiceCenter.owner_user_id.isnot(None),
+            )
+        )
+        sc: ServiceCenter | None = result.scalar_one_or_none()
+
+    if not sc:
+        await callback.answer(
+            "❌ Автосервис не найден или недоступен. Попробуйте выбрать другой.",
+            show_alert=True,
+        )
+        return
+
+    # Сохраняем выбранный сервис в состоянии заявки
+    await state.update_data(service_center_id=sc.id)
+
+    rating_text = ""
+    if sc.ratings_count and sc.ratings_count > 0:
+        rating_text = f"\n⭐ Рейтинг: {sc.rating:.1f} (на основе {sc.ratings_count} оценок)"
+
+    await callback.message.edit_text(
+        f"🏭 Вы выбрали автосервис:\n\n"
+        f"<b>{sc.name}</b>\n"
+        f"📍 {sc.address or 'Адрес не указан'}"
+        f"{rating_text}\n\n"
+        "Теперь опишите, пожалуйста, проблему с автомобилем как можно подробнее.",
+        parse_mode="HTML",
+    )
+
+    await state.set_state(RequestForm.description)
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.service_center, F.data == "request_back_to_service_list")
+async def request_back_to_service_list(callback: CallbackQuery, state: FSMContext):
+    """
+    Возврат к обычному списку подходящих СТО (без учёта георадиуса).
+    """
+    await _ask_service_center_for_request(callback, state)
     await callback.answer()
 
 
@@ -2512,40 +2864,38 @@ async def skip_photo(callback: CallbackQuery, state: FSMContext):
 async def process_can_drive(callback: CallbackQuery, state: FSMContext):
     """
     Обработка ответа на вопрос:
-    Может ли автомобиль передвигаться своим ходом.
+    Может ли автомобиль передвигаться своим ходом?
 
-    ✅ Если ДА — не спрашиваем гео, сразу идём к вопросу "Когда удобно?".
-    ❌ Если НЕТ — спрашиваем геолокацию/адрес (эвакуатор / выездной мастер).
+    Новая логика:
+    - если машина МОЖЕТ ехать сама → локацию не спрашиваем, сразу спрашиваем дату;
+    - если НЕ может → спрашиваем местоположение (гео/адрес).
     """
     can_drive = callback.data == "can_drive_yes"
     await state.update_data(can_drive=can_drive)
 
     if can_drive:
-        # Машина может ехать сама — гео не спрашиваем
+        # Машина едет сама — не трогаем геолокацию, сразу спрашиваем дату
         await callback.message.edit_text(
-            "✅ Понял, автомобиль может передвигаться своим ходом.\n\n"
-            "⏰ Когда вам удобно выполнить работу?\n"
-            "Напишите удобное время в свободной форме (например, «Сегодня после 18:00»).",
+            "⏰ Когда вам удобно выполнить работу?\n\n"
+            "Напишите дату или период в свободной форме "
+            "(например, «Сегодня», «Завтра после обеда», «В выходные»)."
         )
         await state.set_state(RequestForm.preferred_date)
-        await callback.answer()
-        return
+    else:
+        # Нужен эвакуатор / выездной мастер — местоположение важно
+        await callback.message.edit_text(
+            "📍 Теперь укажем текущее местоположение автомобиля.\n\n"
+            "Вы можете:\n"
+            "• отправить геолокацию кнопкой ниже;\n"
+            "• или написать адрес/ориентиры вручную.\n\n"
+            "Если не хотите указывать местоположение, нажмите «⏭️ Пропустить локацию».",
+        )
+        await callback.message.answer(
+            "Отправьте геолокацию или введите адрес:",
+            reply_markup=get_location_reply_kb(),
+        )
+        await state.set_state(RequestForm.location)
 
-    # Машина НЕ может ехать — спрашиваем местоположение
-    text = (
-        "📍 Теперь укажем текущее местоположение автомобиля.\n\n"
-        "Вы можете:\n"
-        "• отправить геолокацию кнопкой ниже;\n"
-        "• или написать адрес/ориентиры вручную.\n\n"
-        "Если не хотите указывать местоположение, нажмите «⏭️ Пропустить локацию»."
-    )
-
-    await callback.message.edit_text(text)
-    await callback.message.answer(
-        "Отправьте геолокацию или введите адрес:",
-        reply_markup=get_location_reply_kb(),
-    )
-    await state.set_state(RequestForm.location)
     await callback.answer()
 
 
