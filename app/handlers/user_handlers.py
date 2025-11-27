@@ -2606,12 +2606,13 @@ async def select_car_for_request(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(RequestForm.service_center, F.data.startswith("select_sc_for_request:"))
 async def select_sc_for_request(callback: CallbackQuery, state: FSMContext):
     """
-    Пользователь выбрал конкретный автосервис для заявки.
+    Пользователь выбрал конкретный автосервис из списка.
+    После этого просим описать проблему.
     """
     try:
-        sc_id = int(callback.data.split(":")[1])
-    except (IndexError, ValueError):
-        await callback.answer("Некорректные данные", show_alert=True)
+        sc_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Не удалось понять, какой автосервис выбран 🤔", show_alert=True)
         return
 
     async with AsyncSessionLocal() as session:
@@ -3587,48 +3588,6 @@ async def my_points(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
         reply_markup=get_main_kb(),
     )
-    await callback.answer()
-
-
-@router.callback_query(RequestForm.service_center, F.data.startswith("select_sc_for_request:"))
-async def select_sc_for_request(callback: CallbackQuery, state: FSMContext):
-    """
-    Пользователь выбрал конкретный автосервис из списка.
-    После этого просим описать проблему.
-    """
-    try:
-        sc_id = int(callback.data.split(":")[1])
-    except (ValueError, IndexError):
-        await callback.answer("Не удалось понять, какой автосервис выбран 🤔", show_alert=True)
-        return
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(ServiceCenter).where(ServiceCenter.id == sc_id)
-        )
-        sc = result.scalar_one_or_none()
-
-    if not sc:
-        await callback.answer("Автосервис не найден, попробуйте ещё раз 🙏", show_alert=True)
-        return
-
-    await state.update_data(service_center_id=sc.id)
-
-    data = await state.get_data()
-    service_name = data.get("service_type", "услуга")
-
-    logger.info(
-        "✅ Для заявки выбран автосервис id=%s name=%s (service_type=%s)",
-        sc.id, sc.name, service_name,
-    )
-
-    await callback.message.edit_text(
-        f"🏭 Вы выбрали автосервис: <b>{sc.name}</b>\n"
-        f"🔧 Тип работ: <b>{service_name}</b>\n\n"
-        "Теперь опишите проблему или нужные работы (можно голосом или текстом):",
-        parse_mode="HTML",
-    )
-    await state.set_state(RequestForm.description)
     await callback.answer()
 
 

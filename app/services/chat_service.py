@@ -2,12 +2,14 @@ import logging
 from typing import Optional
 
 from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions, InlineKeyboardButton
-
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
+    InlineKeyboardButton,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
-from app.config import config
 from app.database.db import AsyncSessionLocal
 from app.database.models import Request, User, Car, ServiceCenter
 
@@ -15,6 +17,7 @@ from app.database.models import Request, User, Car, ServiceCenter
 def _format_status(status: Optional[str]) -> str:
     """
     Человекочитаемый статус заявки для отображения в карточке.
+    Используется и в админке, и в карточке заявки в чатах.
     """
     status = status or "new"
     mapping = {
@@ -188,7 +191,7 @@ def _format_request_text(
 
     text = (
         f"📋 Заявка #{request.id}\n\n"
-        f"👤 Клиент: {user.full_name or 'Не указано'}\n\n"   # <- БЕЗ телефона и ID
+        f"👤 Клиент: {user.full_name or 'Не указано'}\n\n"  # <- БЕЗ телефона и ID
         f"{car_block}\n\n"
         f"🛠️ Услуга: {request.service_type}\n\n"
         f"📝 Описание:\n{request.description}\n\n"
@@ -209,7 +212,13 @@ def _format_request_text(
 
 async def create_request_chat(bot: Bot, request_id: int) -> None:
     """
-    Создаёт "карточку заявки" в чате сервиса (или общем MANAGER_CHAT_ID).
+    Создаёт "карточку заявки" в чате сервиса.
+
+    ВАЖНО:
+    - больше НЕТ фоллбэка на MANAGER_CHAT_ID из .env;
+    - отправляем только в чаты, привязанные к ServiceCenter в БД:
+        • группа сервиса (manager_chat_id при send_to_group=True)
+        • ЛС владельца сервиса (owner_user_id -> User.telegram_id при send_to_owner=True).
     """
     async with AsyncSessionLocal() as session:
         try:
@@ -232,12 +241,20 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
 
             request, user, car, service_center = row
 
+            # Жёсткое требование: только из БД, global-чат не используем
+            if not service_center:
+                logging.error(
+                    f"❌ create_request_chat: у заявки #{request_id} нет привязанного автосервиса "
+                    f"(service_center_id IS NULL). Карточка не будет отправлена."
+                )
+                return
+
             primary_chat_id: Optional[int] = None
             extra_chat_ids: list[int] = []
 
             # Определяем основной и дополнительные каналы для сервиса
             owner_telegram_id: Optional[int] = None
-            if service_center and service_center.owner_user_id:
+            if service_center.owner_user_id:
                 owner_res = await session.execute(
                     select(User).where(User.id == service_center.owner_user_id)
                 )
@@ -245,29 +262,27 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
                 if owner and owner.telegram_id:
                     owner_telegram_id = owner.telegram_id
 
-            if service_center:
-                # приоритет: группа → ЛС
-                if service_center.send_to_group and service_center.manager_chat_id:
-                    primary_chat_id = service_center.manager_chat_id
+            # приоритет: группа → ЛС владельца
+            if service_center.send_to_group and service_center.manager_chat_id:
+                primary_chat_id = service_center.manager_chat_id
 
-                if service_center.send_to_owner and owner_telegram_id:
-                    if primary_chat_id is None:
-                        primary_chat_id = owner_telegram_id
-                    else:
-                        extra_chat_ids.append(owner_telegram_id)
+            if service_center.send_to_owner and owner_telegram_id:
+                if primary_chat_id is None:
+                    primary_chat_id = owner_telegram_id
+                else:
+                    extra_chat_ids.append(owner_telegram_id)
 
-            # Fallback на глобальный MANAGER_CHAT_ID
             if primary_chat_id is None:
-                if not config.MANAGER_CHAT_ID:
-                    logging.error("❌ MANAGER_CHAT_ID не задан и нет service_center для заявки")
-                    return
-                try:
-                    primary_chat_id = int(config.MANAGER_CHAT_ID)
-                except ValueError:
-                    logging.error(
-                        f"❌ Некорректный MANAGER_CHAT_ID: {config.MANAGER_CHAT_ID}"
-                    )
-                    return
+                logging.error(
+                    f"❌ create_request_chat: не удалось определить чат автосервиса "
+                    f"для заявки #{request_id}. "
+                    f"service_center.id={service_center.id}, "
+                    f"send_to_group={service_center.send_to_group}, "
+                    f"manager_chat_id={service_center.manager_chat_id}, "
+                    f"send_to_owner={service_center.send_to_owner}, "
+                    f"owner_telegram_id={owner_telegram_id}"
+                )
+                return
 
             text = _format_request_text(request, user, car, service_center)
             keyboard = _build_chat_keyboard(request)
@@ -355,7 +370,7 @@ async def update_chat_keyboard(bot: Bot, request_id: int) -> None:
     - если есть service_center:
         • если send_to_group и manager_chat_id → туда
         • иначе, если send_to_owner → ЛС владельца
-    - иначе — fallback на MANAGER_CHAT_ID
+    - НЕТ fallback на MANAGER_CHAT_ID — только БД.
     """
     async with AsyncSessionLocal() as session:
         try:
@@ -383,10 +398,17 @@ async def update_chat_keyboard(bot: Bot, request_id: int) -> None:
                 )
                 return
 
+            if not service_center:
+                logging.error(
+                    f"❌ update_chat_keyboard: у заявки #{request_id} нет привязанного автосервиса, "
+                    f"обновлять клавиатуру нечего."
+                )
+                return
+
             primary_chat_id: Optional[int] = None
 
             owner_telegram_id: Optional[int] = None
-            if service_center and service_center.owner_user_id:
+            if service_center.owner_user_id:
                 owner_res = await session.execute(
                     select(User).where(User.id == service_center.owner_user_id)
                 )
@@ -394,23 +416,22 @@ async def update_chat_keyboard(bot: Bot, request_id: int) -> None:
                 if owner and owner.telegram_id:
                     owner_telegram_id = owner.telegram_id
 
-            if service_center:
-                if service_center.send_to_group and service_center.manager_chat_id:
-                    primary_chat_id = service_center.manager_chat_id
-                elif service_center.send_to_owner and owner_telegram_id:
-                    primary_chat_id = owner_telegram_id
+            if service_center.send_to_group and service_center.manager_chat_id:
+                primary_chat_id = service_center.manager_chat_id
+            elif service_center.send_to_owner and owner_telegram_id:
+                primary_chat_id = owner_telegram_id
 
             if primary_chat_id is None:
-                if not config.MANAGER_CHAT_ID:
-                    logging.error("❌ MANAGER_CHAT_ID не задан и не удалось определить чат сервиса")
-                    return
-                try:
-                    primary_chat_id = int(config.MANAGER_CHAT_ID)
-                except ValueError:
-                    logging.error(
-                        f"❌ Некорректный MANAGER_CHAT_ID: {config.MANAGER_CHAT_ID}"
-                    )
-                    return
+                logging.error(
+                    f"❌ update_chat_keyboard: не удалось определить чат сервиса "
+                    f"для заявки #{request_id}. "
+                    f"service_center.id={service_center.id}, "
+                    f"send_to_group={service_center.send_to_group}, "
+                    f"manager_chat_id={service_center.manager_chat_id}, "
+                    f"send_to_owner={service_center.send_to_owner}, "
+                    f"owner_telegram_id={owner_telegram_id}"
+                )
+                return
 
             keyboard = _build_chat_keyboard(request)
 

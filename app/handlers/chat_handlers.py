@@ -1,8 +1,9 @@
 import logging
 from datetime import datetime
 from typing import Optional, Tuple
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram import Router, F
 from aiogram.types import (
     CallbackQuery,
@@ -21,6 +22,7 @@ from app.database.models import Request, User, ServiceCenter
 from app.services.chat_service import update_chat_keyboard
 from app.services.bonus_service import add_bonus
 from app.keyboards.main_kb import get_rating_kb
+
 
 router = Router()
 
@@ -248,6 +250,97 @@ async def manager_offer_time(message: Message, state: FSMContext):
         "Если комментарий не нужен — напишите <code>-</code>.",
         parse_mode="HTML",
     )
+
+
+# В начале файла убедись, что есть:
+# from datetime import datetime, timedelta
+# from sqlalchemy import select
+# from app.database.models import Request, User, ServiceCenter
+# from app.services.chat_service import update_chat_keyboard  # если ещё нет импорта
+
+
+async def _auto_decline_other_requests(
+    bot: Bot,
+    session: AsyncSession,
+    accepted_request: Request,
+) -> None:
+    """
+    Автоматически отклоняет все другие активные заявки клиента
+    по тому же авто и типу работ, если он принял условия по одной.
+
+    Логика:
+    - тот же user_id;
+    - тот же car_id;
+    - тот же service_type;
+    - статус в ('new', 'offer_sent', 'accepted_by_client');
+    - другой request.id.
+    """
+    try:
+        result = await session.execute(
+            select(Request, ServiceCenter)
+            .join(
+                ServiceCenter,
+                Request.service_center_id == ServiceCenter.id,
+                isouter=True,
+            )
+            .where(
+                Request.user_id == accepted_request.user_id,
+                Request.id != accepted_request.id,
+                Request.service_type == accepted_request.service_type,
+                Request.car_id == accepted_request.car_id,
+                Request.status.in_(["new", "offer_sent", "accepted_by_client"]),
+            )
+        )
+        rows = result.all()
+    except Exception as e:
+        logging.error(
+            f"❌ Ошибка поиска параллельных заявок для auto-decline по #{accepted_request.id}: {e}"
+        )
+        return
+
+    if not rows:
+        return
+
+    now = datetime.now()
+
+    for other_req, other_sc in rows:
+        # подстраховка, вдруг статус уже изменился где-то ещё
+        if other_req.status in ("completed", "rejected"):
+            continue
+
+        other_req.status = "rejected"
+        other_req.rejected_at = now
+
+        # дописываем в комментарий менеджера пометку
+        auto_text = "Автоотказ: клиент выбрал другой сервис."
+        if not other_req.manager_comment:
+            other_req.manager_comment = auto_text
+        else:
+            other_req.manager_comment = f"{other_req.manager_comment}\n\n{auto_text}"
+
+        try:
+            await _notify_service_about_client_action(
+                bot,
+                session,
+                other_req,
+                other_sc,
+                text=(
+                    f"❌ Клиент выбрал другой сервис по заявке #{other_req.id}.\n"
+                    f"Заявка автоматически переведена в статус «Отклонена»."
+                ),
+            )
+        except Exception as e:
+            logging.error(
+                f"❌ Не удалось уведомить сервис об автоотказе по заявке #{other_req.id}: {e}"
+            )
+
+        try:
+            await update_chat_keyboard(bot, other_req.id)
+        except Exception as e:
+            logging.error(
+                f"❌ Не удалось обновить клавиатуру по заявке #{other_req.id} после auto-decline: {e}"
+            )
+
 
 
 @router.message(ManagerOfferStates.waiting_comment)
@@ -703,10 +796,10 @@ async def client_accept_offer_no_phone(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("offer_accept_show_phone:"))
 async def client_accept_offer_show_phone(callback: CallbackQuery):
     """
-    Клиент принимает условия и СОГЛАШАЕТСЯ показать свой номер телефона сервису.
+    Клиент принимает предложение сервиса и СОГЛАСЕН передать свой номер телефона.
     """
     try:
-        request_id = int(callback.data.split(":")[1])
+        request_id = int(callback.data.split(":", 1)[1])
     except (ValueError, IndexError):
         await callback.answer("Некорректные данные", show_alert=True)
         return
@@ -743,60 +836,48 @@ async def client_accept_offer_show_phone(callback: CallbackQuery):
                 )
                 return
 
+            # помечаем как принята клиентом
             request.status = "accepted_by_client"
             request.accepted_at = datetime.now()
-            await session.commit()
 
-            phone_text = user.phone_number or "не указан"
+            # уведомление сервису + передача телефона
+            notify_text = f"✅ Клиент принял условия по заявке #{request.id}."
+            if user.phone_number:
+                notify_text += f"\n📞 Телефон клиента: {user.phone_number}"
 
-            # Уведомляем сервис: клиент принял и дал номер
             await _notify_service_about_client_action(
                 callback.bot,
                 session,
                 request,
                 service_center,
-                text=(
-                    f"✅ Клиент принял условия по заявке #{request.id}.\n"
-                    f"📞 Телефон клиента: {phone_text}"
-                ),
+                text=notify_text,
             )
+
+            # ⚙️ Автоотказ другим параллельным заявкам
+            await _auto_decline_other_requests(callback.bot, session, request)
+
+            # общий коммит
+            await session.commit()
 
         except Exception as e:
             await session.rollback()
             logging.error(
-                f"❌ Ошибка при подтверждении условий (с номером) клиентом для заявки #{request_id}: {e}"
+                f"❌ Ошибка при подтверждении условий клиентом (show_phone) для заявки #{request_id}: {e}"
             )
             await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
             return
 
-    # Бонус за принятие условий
+    # бонусы
     try:
         await add_bonus(
             callback.from_user.id,
             "accept_offer",
-            description=f"Принятие условий с показом номера по заявке #{request_id}",
+            description=f"Принятие условий по заявке #{request_id}",
         )
     except Exception as bonus_err:
         logging.error(f"❌ Ошибка начисления бонуса за принятие условий: {bonus_err}")
 
-    await callback.answer(
-        "✅ Вы приняли условия сервиса и отправили номер телефона менеджеру.",
-        show_alert=True,
-    )
-
-    # Убираем кнопки
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
-    # Обновляем карточку заявки в чате сервиса
-    try:
-        await update_chat_keyboard(callback.bot, request_id)
-    except Exception as e:
-        logging.error(
-            f"❌ Не удалось обновить клавиатуру в чате заявки #{request_id}: {e}"
-        )
+    await callback.answer("✅ Вы приняли условия сервиса и передали свой номер.")
 
 
 @router.callback_query(F.data.startswith("offer_reject:"))
