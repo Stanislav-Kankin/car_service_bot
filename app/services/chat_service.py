@@ -1,5 +1,6 @@
 import logging
 from typing import Optional
+from datetime import datetime
 
 from aiogram import Bot
 from aiogram.types import (
@@ -361,99 +362,167 @@ async def create_request_chat(bot: Bot, request_id: int) -> None:
             logging.error(f"❌ Ошибка создания чата для заявки #{request_id}: {e}")
 
 
-async def update_chat_keyboard(bot: Bot, request_id: int) -> None:
-    """
-    Обновить inline-клавиатуру под сообщением заявки в чате сервиса.
-    Используется после изменения статуса/данных заявки.
+# app/services/chat_service.py
+import logging
+from datetime import datetime
 
-    Логика выбора чата такая же, как в create_request_chat:
-    - если есть service_center:
-        • если send_to_group и manager_chat_id → туда
-        • иначе, если send_to_owner → ЛС владельца
-    - НЕТ fallback на MANAGER_CHAT_ID — только БД.
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from sqlalchemy import select
+
+from app.database.db import AsyncSessionLocal
+from app.database.models import Request, ServiceCenter, User
+
+
+async def update_chat_keyboard(request_id: int, chat_id: int, bot) -> None:
+    """
+    Обновляет inline-клавиатуру под карточкой заявки в чате (чат заявки / группа сервиса).
+    Теперь учитывает расширенный жизненный цикл:
+    new -> offer_sent -> accepted_by_client -> in_progress -> completed / cancelled / rejected
     """
     async with AsyncSessionLocal() as session:
-        try:
-            result = await session.execute(
-                select(Request, ServiceCenter)
-                .join(
-                    ServiceCenter,
-                    Request.service_center_id == ServiceCenter.id,
-                    isouter=True,
-                )
-                .where(Request.id == request_id)
+        result = await session.execute(
+            select(Request, ServiceCenter)
+            .outerjoin(ServiceCenter, Request.service_center_id == ServiceCenter.id)
+            .where(Request.id == request_id)
+        )
+        row = result.first()
+
+        if not row:
+            logging.warning(f"⚠️ update_chat_keyboard: заявка #{request_id} не найдена")
+            return
+
+        request, service_center = row
+
+        if not request.chat_message_id:
+            logging.warning(
+                f"⚠️ update_chat_keyboard: у заявки #{request.id} нет chat_message_id, нечего обновлять"
             )
-            row = result.first()
-            if not row:
-                logging.error(
-                    f"❌ update_chat_keyboard: заявка #{request_id} не найдена"
+            return
+
+        keyboard = _build_request_keyboard(request, service_center)
+
+    logging.info(
+        f"🔧 update_chat_keyboard #{request.id}, status={request.status}, chat_id={chat_id}"
+    )
+
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=request.chat_message_id,
+            reply_markup=keyboard,
+        )
+    except Exception as e:
+        # Например: 'message is not modified'
+        logging.info(f"ℹ️ Клавиатура для заявки #{request.id} уже актуальна: {e}")
+
+
+def _build_request_keyboard(
+    request: Request,
+    service_center: ServiceCenter | None,
+) -> InlineKeyboardMarkup:
+    """
+    Строим inline-клавиатуру в зависимости от статуса заявки.
+
+    Статусы:
+      - new                 — заявка создана, условия не отправлены
+      - offer_sent          — сервис отправил предложение
+      - accepted_by_client  — клиент принял условия
+      - in_progress         — сервис взял в работу
+      - completed           — работа завершена
+      - cancelled           — отменена после принятия
+      - rejected            — отказ / автоотказ
+    """
+    buttons: list[list[InlineKeyboardButton]] = []
+
+    # Кнопка "Написать менеджеру" — общая, если есть сервис
+    if service_center is not None:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="✉️ Написать менеджеру",
+                    callback_data=f"open_chat:{request.id}",
                 )
-                return
+            ]
+        )
 
-            request, service_center = row
+    # --- Статусы / действия ---
 
-            if not request.chat_message_id:
-                logging.warning(
-                    f"⚠️ update_chat_keyboard: у заявки #{request_id} нет chat_message_id, нечего обновлять"
+    if request.status == "new":
+        # Тут обычно только менеджер может отправить предложение (у тебя это уже реализовано)
+        # Никаких дополнительных кнопок не добавляем.
+        pass
+
+    elif request.status == "offer_sent":
+        # Клиент может принять или отказаться (это уже реализовано в клиентских хендлерах).
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="✅ Принять условия",
+                    callback_data=f"client_accept_offer:{request.id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отказаться",
+                    callback_data=f"client_reject_offer:{request.id}",
+                ),
+            ]
+        )
+
+    elif request.status == "accepted_by_client":
+        # Клиент уже подтвердил, теперь ход за сервисом:
+        # Принять в работу / Отменить заявку
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="🔧 Принять в работу",
+                    callback_data=f"manager_start_work:{request.id}",
+                ),
+                InlineKeyboardButton(
+                    text="🚫 Отменить заявку",
+                    callback_data=f"manager_cancel_after_accept:{request.id}",
+                ),
+            ]
+        )
+
+    elif request.status == "in_progress":
+        # Заявка в работе: сервис может завершить или отменить
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="✅ Работа выполнена",
+                    callback_data=f"manager_finish_work:{request.id}",
+                ),
+                InlineKeyboardButton(
+                    text="🚫 Отменить заявку",
+                    callback_data=f"manager_cancel_after_accept:{request.id}",
+                ),
+            ]
+        )
+
+    elif request.status in ("completed",):
+        # Работа завершена — управление дальше за клиентом (оценка и отзыв, сделаем следующим шагом)
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="✅ Работа завершена",
+                    callback_data="noop_completed",
                 )
-                return
+            ]
+        )
 
-            if not service_center:
-                logging.error(
-                    f"❌ update_chat_keyboard: у заявки #{request_id} нет привязанного автосервиса, "
-                    f"обновлять клавиатуру нечего."
+    elif request.status in ("cancelled", "rejected"):
+        # Отменённые/отклонённые — только статичное сообщение
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="❌ Заявка закрыта",
+                    callback_data="noop_closed",
                 )
-                return
+            ]
+        )
 
-            primary_chat_id: Optional[int] = None
+    # На всякий случай: если почему-то нет ни одной кнопки — вернём пустую клаву,
+    # чтобы edit_message_reply_markup не падал
+    if not buttons:
+        buttons = [[]]
 
-            owner_telegram_id: Optional[int] = None
-            if service_center.owner_user_id:
-                owner_res = await session.execute(
-                    select(User).where(User.id == service_center.owner_user_id)
-                )
-                owner = owner_res.scalar_one_or_none()
-                if owner and owner.telegram_id:
-                    owner_telegram_id = owner.telegram_id
-
-            if service_center.send_to_group and service_center.manager_chat_id:
-                primary_chat_id = service_center.manager_chat_id
-            elif service_center.send_to_owner and owner_telegram_id:
-                primary_chat_id = owner_telegram_id
-
-            if primary_chat_id is None:
-                logging.error(
-                    f"❌ update_chat_keyboard: не удалось определить чат сервиса "
-                    f"для заявки #{request_id}. "
-                    f"service_center.id={service_center.id}, "
-                    f"send_to_group={service_center.send_to_group}, "
-                    f"manager_chat_id={service_center.manager_chat_id}, "
-                    f"send_to_owner={service_center.send_to_owner}, "
-                    f"owner_telegram_id={owner_telegram_id}"
-                )
-                return
-
-            keyboard = _build_chat_keyboard(request)
-
-            try:
-                await bot.edit_message_reply_markup(
-                    chat_id=primary_chat_id,
-                    message_id=request.chat_message_id,
-                    reply_markup=keyboard,
-                )
-                logging.info(
-                    f"🔧 update_chat_keyboard #{request_id}, status={request.status}, chat_id={primary_chat_id}"
-                )
-            except Exception as e:
-                if "message is not modified" in str(e):
-                    logging.info(
-                        f"ℹ️ Клавиатура для заявки #{request_id} уже актуальна, "
-                        f"Telegram вернул 'message is not modified'"
-                    )
-                else:
-                    logging.error(
-                        f"❌ Не удалось обновить клавиатуру чата для заявки #{request_id}: {e}"
-                    )
-
-        except Exception as e:
-            logging.error(f"❌ Ошибка в update_chat_keyboard для заявки #{request_id}: {e}")
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

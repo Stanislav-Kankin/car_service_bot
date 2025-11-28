@@ -342,7 +342,6 @@ async def _auto_decline_other_requests(
             )
 
 
-
 @router.message(ManagerOfferStates.waiting_comment)
 async def manager_offer_comment(message: Message, state: FSMContext):
     """
@@ -408,23 +407,26 @@ async def manager_offer_comment(message: Message, state: FSMContext):
                         manager_telegram_id = owner.telegram_id
 
             # Кнопки для клиента:
-            # принять с номером / без номера, отклонить + написать менеджеру
+            # 1) Отправить номер
+            # 2) Принять без передачи номера
+            # 3) Отклонить
+            # 4) Написать менеджеру (если есть контакт)
             kb_rows = [
                 [
                     InlineKeyboardButton(
-                        text="✅ Принять (показать номер)",
+                        text="📞 Отправить номер телефона",
                         callback_data=f"offer_accept_show_phone:{request.id}",
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        text="✅ Принять (не показывать номер)",
+                        text="✅ Принять без передачи номера",
                         callback_data=f"offer_accept_no_phone:{request.id}",
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        text="❌ Отклонить",
+                        text="❌ Отклонить предложение",
                         callback_data=f"offer_reject:{request.id}",
                     ),
                 ],
@@ -446,7 +448,11 @@ async def manager_offer_comment(message: Message, state: FSMContext):
                 f"📋 Ваша заявка #{request.id}\n\n"
                 f"🛠 Услуга: {request.service_type}\n\n"
                 f"💬 Условия от сервиса:\n{comment_text}\n\n"
-                "Вы можете принять, отклонить эти условия или задать вопрос менеджеру."
+                "Вы можете:\n"
+                "• отправить номер телефона для связи;\n"
+                "• принять условия без передачи номера (общение только через Telegram);\n"
+                "• задать вопрос менеджеру;\n"
+                "• отклонить предложение."
             )
 
             try:
@@ -520,6 +526,169 @@ async def manager_reject_start(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(ManagerRejectStates.waiting_reason)
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("manager_start_work:"))
+async def manager_start_work_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    """
+    Менеджер/СТО нажимает "Принять в работу".
+    Допускаем только после accepted_by_client.
+    """
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer("Некорректные данные кнопки", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        # Загружаем заявку + сервис
+        result = await session.execute(
+            select(Request, ServiceCenter)
+            .outerjoin(ServiceCenter, Request.service_center_id == ServiceCenter.id)
+            .where(Request.id == request_id)
+        )
+        row = result.first()
+
+        if not row:
+            await callback.answer("Заявка не найдена", show_alert=True)
+            return
+
+        request, service_center = row
+
+        # Проверка права — только владелец СТО
+        result_user = await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+        actor = result_user.scalar_one_or_none()
+
+        if not actor or not service_center or actor.id != service_center.owner_user_id:
+            await callback.answer("Только представитель сервиса может менять статус.", show_alert=True)
+            return
+
+        if request.status != "accepted_by_client":
+            await callback.answer("Заявка не находится на этапе принятия клиентом.", show_alert=True)
+            return
+
+        request.status = "in_progress"
+        request.in_progress_at = datetime.utcnow()
+
+        await session.commit()
+
+    # Обновляем клавиатуру в карточке
+    await update_chat_keyboard(request_id, callback.message.chat.id, callback.bot)
+    await callback.answer("Заявка принята в работу ✅")
+
+
+@router.callback_query(F.data.startswith("manager_finish_work:"))
+async def manager_finish_work_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    """
+    Менеджер/СТО нажимает "Работа выполнена".
+    Допускаем только из статуса in_progress.
+    """
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer("Некорректные данные кнопки", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Request, ServiceCenter)
+            .outerjoin(ServiceCenter, Request.service_center_id == ServiceCenter.id)
+            .where(Request.id == request_id)
+        )
+        row = result.first()
+
+        if not row:
+            await callback.answer("Заявка не найдена", show_alert=True)
+            return
+
+        request, service_center = row
+
+        result_user = await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+        actor = result_user.scalar_one_or_none()
+
+        if not actor or not service_center or actor.id != service_center.owner_user_id:
+            await callback.answer("Только представитель сервиса может менять статус.", show_alert=True)
+            return
+
+        if request.status != "in_progress":
+            await callback.answer("Заявка не находится в работе.", show_alert=True)
+            return
+
+        request.status = "completed"
+        request.completed_at = datetime.utcnow()
+
+        await session.commit()
+
+    await update_chat_keyboard(request_id, callback.message.chat.id, callback.bot)
+
+    # На этом шаге просто фиксируем "завершено".
+    # Следующим этапом повесим сюда запрос оценки и отзыва.
+    await callback.answer("Заявка помечена как выполненная ✅")
+
+
+@router.callback_query(F.data.startswith("manager_cancel_after_accept:"))
+async def manager_cancel_after_accept_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    """
+    Менеджер/СТО отменяет заявку после того, как клиент принял условия
+    (из статусов accepted_by_client или in_progress).
+    """
+    try:
+        request_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer("Некорректные данные кнопки", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Request, ServiceCenter)
+            .outerjoin(ServiceCenter, Request.service_center_id == ServiceCenter.id)
+            .where(Request.id == request_id)
+        )
+        row = result.first()
+
+        if not row:
+            await callback.answer("Заявка не найдена", show_alert=True)
+            return
+
+        request, service_center = row
+
+        result_user = await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+        actor = result_user.scalar_one_or_none()
+
+        if not actor or not service_center or actor.id != service_center.owner_user_id:
+            await callback.answer("Только представитель сервиса может менять статус.", show_alert=True)
+            return
+
+        if request.status not in ("accepted_by_client", "in_progress"):
+            await callback.answer("Эту заявку нельзя отменить на текущем этапе.", show_alert=True)
+            return
+
+        request.status = "cancelled"
+        request.rejected_at = datetime.utcnow()
+        # Добавим пометку в комментарий, не трогая уже существующий
+        base_comment = request.manager_comment or ""
+        suffix = "\n\nОтмена сервиса." if base_comment else "Отмена сервиса."
+        request.manager_comment = base_comment + suffix
+
+        await session.commit()
+
+    await update_chat_keyboard(request_id, callback.message.chat.id, callback.bot)
+    await callback.answer("Заявка отменена 🚫")
 
 
 @router.message(ManagerRejectStates.waiting_reason)
