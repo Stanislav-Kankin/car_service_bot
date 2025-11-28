@@ -3058,11 +3058,22 @@ async def edit_request(callback: CallbackQuery, state: FSMContext):
     """
     data = await state.get_data()
     current_preferred = data.get("preferred_date") or data.get("preferred_date_raw") or "не указано"
+    location_desc = data.get("location_description")
+    if data.get("location_lat") and data.get("location_lon"):
+        location_short = "указаны координаты"
+    elif location_desc:
+        location_short = location_desc[:70] + ("…" if len(location_desc) > 70 else "")
+    else:
+        location_short = "не указано"
 
     text = (
         "✏️ <b>Редактирование заявки</b>\n\n"
-        "Вы можете изменить отдельные поля заявки перед отправкой менеджеру.\n\n"
-        f"Текущая дата/время: <i>{current_preferred}</i>\n\n"
+        "Вы можете изменить отдельные поля заявки перед отправкой менеджеру:\n"
+        "• описание проблемы;\n"
+        "• местоположение автомобиля;\n"
+        "• дату и удобный интервал времени.\n\n"
+        f"Текущая дата/время: <i>{current_preferred}</i>\n"
+        f"Текущее местоположение: <i>{location_short}</i>\n\n"
         "Что вы хотите изменить?"
     )
 
@@ -3091,6 +3102,35 @@ async def edit_req_description(callback: CallbackQuery, state: FSMContext):
         reply_markup=get_car_cancel_kb(),
     )
     await state.set_state(RequestForm.edit_description)
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.confirm, F.data == "edit_req_location")
+async def edit_req_location(callback: CallbackQuery, state: FSMContext):
+    """
+    Пользователь хочет изменить местоположение автомобиля.
+    Возвращаем его на шаг RequestForm.location и даём те же подсказки,
+    что и при первичном вводе локации.
+    """
+    data = await state.get_data()
+    can_drive = data.get("can_drive")
+
+    # Общий текст без привязки к тому, может ли ехать сам:
+    # пользователь сам решает, указать ли текущее место или район.
+    await callback.message.edit_text(
+        "📍 Давайте обновим местоположение автомобиля.\n\n"
+        "Вы можете:\n"
+        "• нажать «📍 Отправить геопозицию» и выбрать точку на карте в Telegram;\n"
+        "• или написать адрес/ориентиры вручную (улица, дом, ориентир).\n\n"
+        "Если не хотите указывать местоположение сейчас, нажмите "
+        "«⏭️ Пропустить (укажу позже)».",
+    )
+    await callback.message.answer(
+        "Отправьте геопозицию через кнопку ниже или введите адрес текстом:",
+        reply_markup=get_location_reply_kb(),
+    )
+
+    await state.set_state(RequestForm.location)
     await callback.answer()
 
 

@@ -223,11 +223,21 @@ def get_request_confirm_kb():
 
 # Клавиатура выбора, что редактировать в заявке
 def get_request_edit_kb():
+    """
+    Клавиатура выбора, что именно редактировать в заявке
+    перед окончательным подтверждением.
+    """
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
             text="📝 Изменить описание",
             callback_data="edit_req_description",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="📍 Изменить местоположение",
+            callback_data="edit_req_location",
         )
     )
     builder.row(
