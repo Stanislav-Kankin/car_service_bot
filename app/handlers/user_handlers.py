@@ -38,6 +38,7 @@ from app.keyboards.main_kb import (
     get_service_specializations_kb, get_reset_profile_kb,
     get_search_radius_kb,
     get_time_slot_kb,
+    get_request_edit_kb,
 )
 
 from app.config import config
@@ -86,6 +87,8 @@ class RequestForm(StatesGroup):
     preferred_time_slot = State()
     # финальное подтверждение
     confirm = State()
+    # редактирование описания перед подтверждением
+    edit_description = State()
 
 
 class Registration(StatesGroup):
@@ -1593,24 +1596,36 @@ async def process_edit_brand(message: Message, state: FSMContext):
     await select_car(fake_callback, state)
 
 
-#  Обработчик геолокации
 @router.message(RequestForm.location, F.location)
 async def process_location_geo(message: Message, state: FSMContext):
     """
-    Пользователь отправил геолокацию для заявки (ветка, где авто не может ехать).
+    Пользователь отправил геопозицию автомобиля (через кнопку
+    «📍 Отправить геопозицию»).
+
+    Сохраняем координаты и двигаемся к выбору даты.
     """
     loc = message.location
+
     await state.update_data(
         location_lat=loc.latitude,
         location_lon=loc.longitude,
-        location_description=None,
+        # Можно сохранить короткое описание, чтобы потом показать ссылку на карту
+        location_description=(
+            f"Координаты: {loc.latitude:.5f}, {loc.longitude:.5f}\n"
+            f"https://maps.google.com/?q={loc.latitude:.5f},{loc.longitude:.5f}"
+        ),
+    )
+
+    # Убираем клавиатуру с гео
+    await message.answer(
+        "✅ Геопозиция автомобиля получена.",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
     await message.answer(
-        "✅ Местоположение получено.\n\n"
-        "⏰ Теперь укажите, когда вам удобно выполнить работу.\n"
-        "Напишите удобную дату или период (например, «Сегодня», «Завтра после 18:00»).",
-        reply_markup=ReplyKeyboardRemove(),
+        "⏰ Когда вам удобно выполнить работу?\n\n"
+        "Напишите удобную дату или период (например, "
+        "«Сегодня после 18:00», «Завтра утром», «В субботу»).",
     )
     await state.set_state(RequestForm.preferred_date)
 
@@ -1619,28 +1634,33 @@ async def process_location_geo(message: Message, state: FSMContext):
 async def process_location_text(message: Message, state: FSMContext):
     """
     Пользователь ввёл местоположение текстом или решил пропустить.
-    Эта ветка используется в сценарии, когда авто НЕ может ехать само.
+    Используется в сценарии, когда авто НЕ может ехать само
+    (эвакуатор / выездной мастер), а пользователь:
+      - либо написал адрес/ориентиры,
+      - либо выбрал «⏭️ Пропустить (укажу позже)».
     """
-    text = (message.text or "").strip().lower()
+    text_raw = (message.text or "").strip()
+    text_lower = text_raw.lower()
 
     # Пропуск локации
-    if text.startswith("⏭️") or "пропустить" in text:
+    if text_lower.startswith("⏭️".lower()) or "пропустить" in text_lower:
         await state.update_data(
             location_lat=None,
             location_lon=None,
             location_description=None,
         )
     else:
-        # Сохраняем текстовый адрес
+        # Сохраняем текстовый адрес/описание
         await state.update_data(
             location_lat=None,
             location_lon=None,
-            location_description=(message.text or "").strip(),
+            location_description=text_raw,
         )
 
     await message.answer(
         "⏰ Когда вам удобно выполнить работу?\n\n"
-        "Напишите удобную дату или период (например, «Сегодня», «Завтра после 18:00»).",
+        "Напишите удобную дату или период (например, "
+        "«Сегодня после 18:00», «Завтра утром», «В субботу»).",
         reply_markup=ReplyKeyboardRemove(),
     )
     await state.set_state(RequestForm.preferred_date)
@@ -1730,6 +1750,54 @@ async def process_edit_model(message: Message, state: FSMContext):
     await select_car(fake_callback, state)
 
 
+def _build_request_preview_text(data: dict) -> str:
+    """
+    Формирует текст превью заявки на этапе подтверждения.
+    Используется и при первичном создании, и при редактировании.
+    """
+    service_type = data.get("service_type", "Не указано")
+    description = data.get("description", "Не указано")
+    photo_id = data.get("photo")
+    photos_text = "есть" if photo_id else "нет"
+
+    can_drive = data.get("can_drive")
+    if can_drive is True:
+        can_drive_text = "Да, может ехать сам"
+    elif can_drive is False:
+        can_drive_text = "Нет, требуется эвакуатор/перевозка"
+    else:
+        can_drive_text = "Не указано"
+
+    # Локация
+    location_lat = data.get("location_lat")
+    location_lon = data.get("location_lon")
+    location_description = data.get("location_description")
+
+    if location_lat and location_lon:
+        location_text = (
+            f"Координаты: {location_lat:.5f}, {location_lon:.5f}\n"
+            f"https://maps.google.com/?q={location_lat:.5f},{location_lon:.5f}"
+        )
+    elif location_description:
+        location_text = location_description
+    else:
+        location_text = "Не указано"
+
+    preferred = data.get("preferred_date") or "Не указано"
+
+    text = (
+        "📄 Заявка на услугу\n\n"
+        f"🔧 Услуга: {service_type}\n"
+        f"📝 Описание: {description}\n"
+        f"📷 Фото: {photos_text}\n"
+        f"🚚 Может ехать сам: {can_drive_text}\n"
+        f"📍 Местоположение: {location_text}\n"
+        f"⏰ Когда удобно: {preferred}\n\n"
+        "Подтвердите создание заявки:"
+    )
+    return text
+
+
 @router.callback_query(RequestForm.preferred_time_slot, F.data.startswith("time_slot:"))
 async def process_time_slot(callback: CallbackQuery, state: FSMContext):
     """
@@ -1771,43 +1839,12 @@ async def process_time_slot(callback: CallbackQuery, state: FSMContext):
     # Кладём финальный текст туда, откуда его потом возьмёт создание заявки
     await state.update_data(preferred_date=preferred)
 
-    service_type = data.get("service_type", "Не указано")
-    description = data.get("description", "Не указано")
-    photo_id = data.get("photo")
-    photos_text = "есть" if photo_id else "нет"
-
-    can_drive = data.get("can_drive")
-    if can_drive is True:
-        can_drive_text = "Да, может ехать сам"
-    elif can_drive is False:
-        can_drive_text = "Нет, требуется эвакуатор/перевозка"
-    else:
-        can_drive_text = "Не указано"
-
-    # Локация
-    location_lat = data.get("location_lat")
-    location_lon = data.get("location_lon")
-    location_description = data.get("location_description")
-
-    if location_lat and location_lon:
-        location_text = (
-            f"Координаты: {location_lat:.5f}, {location_lon:.5f}\n"
-            f"https://maps.google.com/?q={location_lat:.5f},{location_lon:.5f}"
-        )
-    elif location_description:
-        location_text = location_description
-    else:
-        location_text = "Не указано"
+    # Берём актуальные данные и формируем превью
+    new_data = await state.get_data()
+    preview_text = _build_request_preview_text(new_data)
 
     await callback.message.edit_text(
-        "📄 Заявка на услугу\n\n"
-        f"🔧 Услуга: {service_type}\n"
-        f"📝 Описание: {description}\n"
-        f"📷 Фото: {photos_text}\n"
-        f"🚚 Может ехать сам: {can_drive_text}\n"
-        f"📍 Местоположение: {location_text}\n"
-        f"⏰ Когда удобно: {preferred}\n\n"
-        "Подтвердите создание заявки:",
+        preview_text,
         reply_markup=get_request_confirm_kb(),
     )
     await state.set_state(RequestForm.confirm)
@@ -2867,9 +2904,9 @@ async def process_can_drive(callback: CallbackQuery, state: FSMContext):
     Обработка ответа на вопрос:
     Может ли автомобиль передвигаться своим ходом?
 
-    Новая логика:
+    Текущая логика (пока без перестановки шагов):
     - если машина МОЖЕТ ехать сама → локацию не спрашиваем, сразу спрашиваем дату;
-    - если НЕ может → спрашиваем местоположение (гео/адрес).
+    - если НЕ может → спрашиваем местоположение (гео/адрес) по новому сценарию.
     """
     can_drive = callback.data == "can_drive_yes"
     await state.update_data(can_drive=can_drive)
@@ -2884,15 +2921,17 @@ async def process_can_drive(callback: CallbackQuery, state: FSMContext):
         await state.set_state(RequestForm.preferred_date)
     else:
         # Нужен эвакуатор / выездной мастер — местоположение важно
+        # Новый текст ближе к ТЗ: «Отправьте геолокацию или укажите местоположение на карте…»
         await callback.message.edit_text(
-            "📍 Теперь укажем текущее местоположение автомобиля.\n\n"
+            "📍 Отправьте геолокацию или укажите местоположение автомобиля на карте.\n\n"
             "Вы можете:\n"
-            "• отправить геолокацию кнопкой ниже;\n"
-            "• или написать адрес/ориентиры вручную.\n\n"
-            "Если не хотите указывать местоположение, нажмите «⏭️ Пропустить локацию».",
+            "• нажать «📍 Отправить геопозицию» и выбрать точку на карте в Telegram;\n"
+            "• или написать адрес/ориентиры вручную (улица, дом, ориентир).\n\n"
+            "Если не хотите указывать местоположение сейчас, нажмите "
+            "«⏭️ Пропустить (укажу позже)».",
         )
         await callback.message.answer(
-            "Отправьте геолокацию или введите адрес:",
+            "Отправьте геопозицию через кнопку ниже или введите адрес текстом:",
             reply_markup=get_location_reply_kb(),
         )
         await state.set_state(RequestForm.location)
@@ -3013,12 +3052,108 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(RequestForm.confirm, F.data == "edit_request")
 async def edit_request(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "✏️ Редактирование заявки пока не реализовано.\n\n"
-        "Создайте заявку заново.",
-        reply_markup=get_main_kb()
+    """
+    Вход в режим редактирования заявки до сохранения.
+    Показываем меню: что именно пользователь хочет изменить.
+    """
+    data = await state.get_data()
+    current_preferred = data.get("preferred_date") or data.get("preferred_date_raw") or "не указано"
+
+    text = (
+        "✏️ <b>Редактирование заявки</b>\n\n"
+        "Вы можете изменить отдельные поля заявки перед отправкой менеджеру.\n\n"
+        f"Текущая дата/время: <i>{current_preferred}</i>\n\n"
+        "Что вы хотите изменить?"
     )
+
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=get_request_edit_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.confirm, F.data == "edit_req_description")
+async def edit_req_description(callback: CallbackQuery, state: FSMContext):
+    """
+    Пользователь хочет изменить описание проблемы.
+    Переводим в отдельное состояние RequestForm.edit_description.
+    """
+    data = await state.get_data()
+    current_descr = data.get("description") or "ещё не заполнено"
+
+    await callback.message.edit_text(
+        "📝 Отправьте новое описание проблемы.\n\n"
+        "Чем подробнее вы опишете симптомы, тем точнее будет диагностика и расчёт стоимости.\n\n"
+        f"<b>Сейчас указано:</b>\n{current_descr}",
+        parse_mode="HTML",
+        reply_markup=get_car_cancel_kb(),
+    )
+    await state.set_state(RequestForm.edit_description)
+    await callback.answer()
+
+
+@router.message(RequestForm.edit_description)
+async def process_edit_description(message: Message, state: FSMContext):
+    """
+    Обработка нового описания проблемы в режиме редактирования.
+    После сохранения заново показываем превью заявки и возвращаемся к confirm.
+    """
+    text = (message.text or "").strip()
+
+    if len(text) < 5:
+        await message.answer(
+            "❌ Описание слишком короткое. Пожалуйста, опишите проблему чуть подробнее.",
+            reply_markup=get_car_cancel_kb(),
+        )
+        return
+
+    # Обновляем описание в состоянии
+    await state.update_data(description=text)
+    data = await state.get_data()
+
+    preview_text = _build_request_preview_text(data)
+
+    await message.answer(
+        preview_text,
+        reply_markup=get_request_confirm_kb(),
+    )
+    await state.set_state(RequestForm.confirm)
+
+
+@router.callback_query(RequestForm.confirm, F.data == "edit_req_time")
+async def edit_req_time(callback: CallbackQuery, state: FSMContext):
+    """
+    Пользователь хочет изменить дату/время выполнения работ.
+    Возвращаемся на шаг ввода preferred_date, сохранив остальные данные.
+    """
+    data = await state.get_data()
+    current = data.get("preferred_date") or data.get("preferred_date_raw") or "не указано"
+
+    await callback.message.edit_text(
+        "⏰ Когда вам удобно выполнить работу?\n\n"
+        "Напишите дату или период (например, «Сегодня», «Завтра после 18:00», "
+        "«На этой неделе»).\n\n"
+        f"Сейчас указано: {current}",
+        reply_markup=get_car_cancel_kb(),
+    )
+    await state.set_state(RequestForm.preferred_date)
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.confirm, F.data == "edit_req_cancel")
+async def edit_req_cancel(callback: CallbackQuery, state: FSMContext):
+    """
+    Отмена создания заявки из меню редактирования.
+    Полностью очищаем состояние и возвращаем в главное меню.
+    """
     await state.clear()
+    await callback.message.edit_text(
+        "❌ Создание заявки отменено.\n\n"
+        "Главное меню:",
+        reply_markup=get_main_kb(),
+    )
     await callback.answer()
 
 

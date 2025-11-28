@@ -221,6 +221,30 @@ def get_request_confirm_kb():
     return builder.as_markup()
 
 
+# Клавиатура выбора, что редактировать в заявке
+def get_request_edit_kb():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="📝 Изменить описание",
+            callback_data="edit_req_description",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⏰ Изменить дату/время",
+            callback_data="edit_req_time",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="❌ Отменить заявку",
+            callback_data="edit_req_cancel",
+        )
+    )
+    return builder.as_markup()
+
+
 # Клавиатура подтверждения удаления авто
 def get_delete_confirm_kb():
     builder = InlineKeyboardBuilder()
@@ -397,18 +421,22 @@ def get_can_drive_kb():
 
 def get_location_reply_kb():
     """
-    Reply-клавиатура для отправки геолокации или текстового адреса.
+    Reply-клавиатура для отправки геолокации или пропуска шага.
+    Используется:
+    - при регистрации СТО для указания локации сервиса;
+    - при поиске СТО по радиусу;
+    - в заявке, когда нужно указать местоположение авто.
     """
     builder = ReplyKeyboardBuilder()
     builder.row(
         KeyboardButton(
-            text="📍 Отправить геолокацию",
+            text="📍 Отправить геопозицию",
             request_location=True,
         )
     )
     builder.row(
         KeyboardButton(
-            text="⏭️ Пропустить локацию",
+            text="⏭️ Пропустить (укажу позже)",
         )
     )
     return builder.as_markup(
