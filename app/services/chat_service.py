@@ -373,11 +373,17 @@ from app.database.db import AsyncSessionLocal
 from app.database.models import Request, ServiceCenter, User
 
 
-async def update_chat_keyboard(request_id: int, chat_id: int, bot) -> None:
+async def update_chat_keyboard(bot: Bot, request_id: int) -> None:
     """
-    Обновляет inline-клавиатуру под карточкой заявки в чате (чат заявки / группа сервиса).
-    Теперь учитывает расширенный жизненный цикл:
-    new -> offer_sent -> accepted_by_client -> in_progress -> completed / cancelled / rejected
+    Обновляет inline-клавиатуру под карточкой заявки в основном чате сервиса.
+
+    Логика:
+    * Находим заявку и привязанный к ней автосервис.
+    * Определяем основной чат сервиса (аналогично create_request_chat):
+        - если send_to_group и есть manager_chat_id → используем его;
+        - иначе, если send_to_owner и у владельца есть telegram_id → используем его;
+        - иначе логируем предупреждение и выходим.
+    * Берём сохранённый request.chat_message_id и делаем edit_message_reply_markup.
     """
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -399,21 +405,49 @@ async def update_chat_keyboard(request_id: int, chat_id: int, bot) -> None:
             )
             return
 
+        # Определяем основной чат сервиса
+        primary_chat_id: Optional[int] = None
+        if service_center is not None:
+            owner_telegram_id: Optional[int] = None
+            if service_center.owner_user_id:
+                # Получаем владельца сервиса
+                owner_res = await session.execute(
+                    select(User).where(User.id == service_center.owner_user_id)
+                )
+                owner = owner_res.scalar_one_or_none()
+                if owner and owner.telegram_id:
+                    owner_telegram_id = owner.telegram_id
+
+            # приоритет: группа → ЛС владельца
+            if service_center.send_to_group and service_center.manager_chat_id:
+                primary_chat_id = service_center.manager_chat_id
+            elif service_center.send_to_owner and owner_telegram_id:
+                primary_chat_id = owner_telegram_id
+
+        if primary_chat_id is None:
+            logging.warning(
+                "⚠️ update_chat_keyboard: не удалось определить чат автосервиса для заявки "
+                f"#{request.id}. Клавиатура не будет обновлена."
+            )
+            return
+
         keyboard = _build_request_keyboard(request, service_center)
 
     logging.info(
-        f"🔧 update_chat_keyboard #{request.id}, status={request.status}, chat_id={chat_id}"
+        f"🔧 update_chat_keyboard #{request.id}, status={request.status}, chat_id={primary_chat_id}"
     )
 
     try:
         await bot.edit_message_reply_markup(
-            chat_id=chat_id,
+            chat_id=primary_chat_id,
             message_id=request.chat_message_id,
             reply_markup=keyboard,
         )
     except Exception as e:
         # Например: 'message is not modified'
-        logging.info(f"ℹ️ Клавиатура для заявки #{request.id} уже актуальна: {e}")
+        logging.info(
+            f"ℹ️ Клавиатура для заявки #{request.id} уже актуальна или не может быть обновлена: {e}"
+        )
 
 
 def _build_request_keyboard(

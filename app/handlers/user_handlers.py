@@ -7,7 +7,7 @@ from aiogram.types import (
     KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    LinkPreviewOptions,
+    LinkPreviewOptions
 )
 
 from aiogram.filters import Command, StateFilter
@@ -20,11 +20,13 @@ from datetime import datetime
 from math import radians, sin, cos, sqrt, atan2
 import logging
 
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.notification_service import notify_manager_about_new_request
 from app.services.bonus_service import add_bonus, get_user_balance
 from app.database.models import User, Car, Request, ServiceCenter
 from app.database.comment_models import Comment
 from app.database.db import AsyncSessionLocal
+from app.services.chat_service import update_chat_keyboard
 from app.keyboards.main_kb import (
     get_main_kb, get_registration_kb,
     get_phone_reply_kb, get_garage_kb,
@@ -32,7 +34,7 @@ from app.keyboards.main_kb import (
     get_service_types_kb, get_tire_subtypes_kb,
     get_electric_subtypes_kb, get_aggregates_subtypes_kb,
     get_photo_skip_kb, get_request_confirm_kb,
-    get_delete_confirm_kb, get_history_kb, get_edit_cancel_kb,
+    get_delete_confirm_kb, get_edit_cancel_kb,
     get_can_drive_kb, get_location_reply_kb, get_role_kb,
     get_manager_main_kb, get_service_notifications_kb,
     get_service_specializations_kb, get_reset_profile_kb,
@@ -2587,11 +2589,15 @@ async def request_send_to_all(callback: CallbackQuery, state: FSMContext):
     """
     Пользователь выбрал вариант 'Отправить всем подходящим'.
     Логика:
-    - Явно НЕ привязываем заявку к конкретному СТО (service_center_id = None).
-    - Созданная заявка уйдёт в общий менеджерский канал / MANAGER_CHAT_ID.
+    - Не привязываем к одному СТО.
+    - На этапе подтверждения создадим несколько заявок (по одной на каждое подходящее СТО)
+      и свяжем их через broadcast_group_id.
     """
-    # Явно обнуляем привязку к конкретному сервису
-    await state.update_data(service_center_id=None, send_mode="all")
+    # Явно обнуляем привязку к конкретному сервису и включаем режим рассылки
+    await state.update_data(
+        service_center_id=None,
+        broadcast_mode=True,
+    )
 
     await callback.message.edit_text(
         "📤 Заявка будет отправлена всем подходящим автосервисам.\n\n"
@@ -2939,115 +2945,115 @@ async def process_can_drive(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(RequestForm.confirm, F.data == "confirm_request")
-async def confirm_request(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "confirm_request")
+async def confirm_request(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    """
+    Клиент подтвердил заполненную заявку.
+    Здесь создаём Request в БД, отправляем уведомление сервису/менеджеру
+    и начисляем бонус за создание заявки.
+    """
+    await callback.answer()
+
     data = await state.get_data()
+    user_id = callback.from_user.id
 
     car_id = data.get("car_id")
+    service_center_id = data.get("service_center_id")
     service_type = data.get("service_type")
+    category_code = data.get("category_code")
     description = data.get("description")
-    photo_id = data.get("photo")
+    photo_file_id = data.get("photo_file_id")
+    location_lat = data.get("location_lat")
+    location_lon = data.get("location_lon")
+    location_description = data.get("location_description")
+    can_drive = data.get("can_drive")
     preferred_date = data.get("preferred_date")
 
-    can_drive = data.get("can_drive")
-    loc_lat = data.get("location_lat")
-    loc_lon = data.get("location_lon")
-    loc_desc = data.get("location_description")
-    service_center_id = data.get("service_center_id")
-    category_code = data.get("category_code")  # 🔹 новое поле
-
-    if not car_id:
-        await callback.message.edit_text(
-            "❌ Автомобиль для заявки не выбран.",
-            reply_markup=get_main_kb()
-        )
-        await state.clear()
-        await callback.answer()
-        return
-
     async with AsyncSessionLocal() as session:
-        try:
-            # Находим пользователя
-            user_result = await session.execute(
-                select(User).where(User.telegram_id == callback.from_user.id)
+        # Находим пользователя в БД (он точно существует, т.к. регистрацию уже проходил)
+        result = await session.execute(
+            select(User).where(User.telegram_id == user_id)
+        )
+        db_user: User | None = result.scalar_one_or_none()
+        if not db_user:
+            # На всякий случай, если вдруг нет записи
+            db_user = User(
+                telegram_id=user_id,
+                full_name=callback.from_user.full_name,
             )
-            user = user_result.scalar_one_or_none()
+            session.add(db_user)
+            await session.flush()
 
-            if not user:
-                await callback.message.edit_text(
-                    "❌ Пользователь не найден. Начните с /start",
-                    reply_markup=get_main_kb()
-                )
-                await state.clear()
-                await callback.answer()
-                return
-
-            # Проверяем, что авто принадлежит пользователю
+        # На всякий случай проверим, что машина принадлежит этому пользователю
+        if car_id:
             car_result = await session.execute(
-                select(Car).where(Car.id == car_id, Car.user_id == user.id)
+                select(Car).where(
+                    Car.id == car_id,
+                    Car.user_id == db_user.id,
+                )
             )
             car = car_result.scalar_one_or_none()
-
             if not car:
-                await callback.message.edit_text(
-                    "❌ Автомобиль не найден.",
-                    reply_markup=get_main_kb()
-                )
-                await state.clear()
-                await callback.answer()
-                return
+                car_id = None  # не нашли — не привязываем
 
-            # Создаём заявку
-            new_request = Request(
-                user_id=user.id,
-                car_id=car.id,
-                service_type=service_type,
-                category_code=category_code,
-                description=description,
-                photo_file_id=photo_id,
-                status="new",
-                preferred_date=preferred_date,
-                can_drive=can_drive,
-                location_lat=loc_lat,
-                location_lon=loc_lon,
-                location_description=loc_desc,
-                service_center_id=service_center_id,
-            )
+        new_request = Request(
+            user_id=db_user.id,
+            car_id=car_id,
+            service_center_id=service_center_id,
+            service_type=service_type,
+            category_code=category_code,
+            description=description,
+            photo_file_id=photo_file_id,
+            location_lat=location_lat,
+            location_lon=location_lon,
+            location_description=location_description,
+            can_drive=can_drive,
+            preferred_date=preferred_date,
+            status="new",
+        )
+        session.add(new_request)
+        await session.flush()  # чтобы получить new_request.id
 
-            session.add(new_request)
-            await session.commit()
+        request_id = new_request.id
 
-            # ✅ Бонус за создание заявки
-            try:
-                await add_bonus(
-                    callback.from_user.id,
-                    "new_request",
-                    description=f"Создание заявки #{new_request.id}",
-                )
-            except Exception as bonus_err:
-                logging.error(f"❌ Ошибка начисления бонуса за создание заявки: {bonus_err}")
-
-            # 🔔 Уведомляем менеджера/сервис о новой заявке
-            try:
-                await notify_manager_about_new_request(callback.bot, new_request.id)
-            except Exception as notify_error:
-                logging.error(f"❌ Ошибка при отправке уведомления менеджеру: {notify_error}")
-
-            await callback.message.edit_text(
-                "✅ Ваша заявка отправлена менеджеру!\n\n"
-                "Вам придет уведомление, когда менеджер начнет обработку.",
-                reply_markup=get_main_kb()
+        # Бонус за создание заявки
+        try:
+            await add_bonus(
+                session=session,
+                user=db_user,
+                action="new_request",
+                description=f"Создание заявки #{request_id}",
             )
         except Exception as e:
-            await session.rollback()
-            logging.error(f"❌ Ошибка при сохранении заявки: {e}")
-            await callback.message.edit_text(
-                "❌ Ошибка при создании заявки. Попробуйте позже.",
-                reply_markup=get_main_kb()
+            logging.error(
+                "❌ Ошибка начисления бонусов за создание заявки #%s: %s",
+                request_id,
+                e,
             )
 
+        await session.commit()
+
+    # Уведомляем менеджера/СТО о новой заявке (логика уже была реализована)
+    try:
+        await notify_manager_about_new_request(
+            bot=callback.bot,
+            request_id=request_id,
+        )
+    except Exception as e:
+        logging.error(
+            "❌ Ошибка при отправке уведомления менеджеру по заявке #%s: %s",
+            request_id,
+            e,
+        )
+
     await state.clear()
-    await callback.answer()
+    await callback.message.edit_text(
+        "✅ Заявка отправлена.\n\n"
+        "Сервис(ы) получат вашу заявку и отправят предложение по стоимости и срокам."
+    )
 
 
 @router.callback_query(RequestForm.confirm, F.data == "edit_request")
@@ -3599,131 +3605,190 @@ def _build_history_kb(filter_key: str, page: int, total_pages: int):
 
 
 @router.callback_query(F.data.startswith("client_accept_offer:"))
-async def client_accept_offer(callback: CallbackQuery):
-    """Клиент подтверждает условия менеджера по заявке"""
+async def client_accept_offer(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """
+    Клиент нажал 'Принять условия'.
+    Меняем статус заявки, записываем время, автоотклоняем другие похожие заявки
+    и обновляем клавиатуру у менеджера.
+    """
+    await callback.answer()
+
     try:
         request_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.message.answer("Не удалось определить заявку.")
+        return
 
-        async with AsyncSessionLocal() as session:
-            user_result = await session.execute(
-                select(User).where(User.telegram_id == callback.from_user.id)
-            )
-            user = user_result.scalar_one_or_none()
-            if not user:
-                await callback.answer("❌ Пользователь не найден. Нажмите /start", show_alert=True)
-                return
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Request, User)
+            .join(User, Request.user_id == User.id)
+            .where(Request.id == request_id)
+        )
+        row = result.first()
+        if not row:
+            await callback.message.edit_text("Заявка не найдена.")
+            return
 
-            req_result = await session.execute(
-                select(Request).where(
-                    Request.id == request_id,
-                    Request.user_id == user.id,
-                )
-            )
-            request = req_result.scalar_one_or_none()
-            if not request:
-                await callback.answer("❌ Заявка не найдена", show_alert=True)
-                return
+        request: Request = row[0]
+        db_user: User = row[1]
 
-            request.status = "accepted"
-            await session.commit()
+        # Статус после принятия клиентом
+        # ВАЖНО: чтобы не ломать старую логику кнопок у менеджера,
+        # выставляем status='accepted' (как будто заявка принята сервисом).
+        request.status = "accepted"
+        request.accepted_at = datetime.utcnow()
 
-        # ✅ Бонус за подтверждение условий
+        # Автоотказ остальных заявок по той же машине и типу услуги
         try:
-            await add_bonus(
-                callback.from_user.id,
-                "accept_offer",
-                description=f"Подтверждение условий по заявке #{request_id}",
+            await _auto_decline_other_requests(
+                session=session,
+                current_request=request,
+                bot=callback.bot,
             )
-        except Exception as bonus_err:
-            logging.error(f"❌ Ошибка начисления бонуса за подтверждение условий: {bonus_err}")
+        except Exception as e:
+            logging.error(
+                "❌ Ошибка auto-decline для заявки #%s: %s",
+                request.id,
+                e,
+            )
 
-        await callback.message.edit_text(
-            f"✅ Вы подтвердили условия по заявке #{request_id}.\n"
-            f"Менеджер свяжется с вами для записи и выполнения работ."
+        await session.commit()
+
+    # Обновляем клавиатуру в чате сервиса (кнопки 'В работу', 'Завершить' и т.п.)
+    try:
+        await update_chat_keyboard(callback.bot, request_id)
+    except Exception as e:
+        logging.error(
+            "❌ Не удалось обновить клавиатуру по заявке #%s после accept_offer: %s",
+            request_id,
+            e,
         )
 
-        try:
-            await callback.bot.send_message(
-                chat_id=config.MANAGER_CHAT_ID,
-                text=(
-                    f"✅ Клиент подтвердил условия по заявке #{request_id}\n\n"
-                    f"Комментарий менеджера:\n"
-                    f"{request.manager_comment or '—'}"
-                ),
+    # Бонус клиенту за принятие условий
+    try:
+        async with AsyncSessionLocal() as session:
+            await add_bonus(
+                session=session,
+                user=db_user,
+                action="accept_offer",
+                description=f"Принятие условий по заявке #{request_id}",
             )
-        except Exception as e:
-            logging.error(f"❌ Не удалось уведомить менеджеров о принятии условий: {e}")
-
-        try:
-            from app.handlers.chat_handlers import update_chat_keyboard
-            await update_chat_keyboard(callback.bot, request_id)
-        except Exception as e:
-            logging.error(f"❌ Не удалось обновить клавиатуру в чате заявки: {e}")
-
-        await callback.answer()
-
+            await session.commit()
     except Exception as e:
-        logging.error(f"❌ Ошибка при подтверждении условий клиентом: {e}")
-        await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
+        logging.error(
+            "❌ Ошибка начисления бонусов за accept_offer по заявке #%s: %s",
+            request_id,
+            e,
+        )
+
+    await callback.message.edit_text(
+        "✅ Условия приняты.\n\n"
+        "Сервис свяжется с вами для уточнения деталей и записи."
+    )
+
+
+# === ВСПОМОГАТЕЛЬНО: автоотказ других заявок по той же машине и типу услуги ===
+
+async def _auto_decline_other_requests(
+    session: AsyncSession,
+    current_request: Request,
+    bot,
+) -> None:
+    """
+    Автоотказ по другим активным заявкам того же пользователя, той же машины и того же типа услуги,
+    когда клиент принял условия по одной из них.
+
+    Ничего не делаем, если у текущей заявки нет car_id или service_type.
+    """
+    if not current_request.car_id or not current_request.service_type:
+        return
+
+    result = await session.execute(
+        select(Request, ServiceCenter)
+        .join(ServiceCenter, Request.service_center_id == ServiceCenter.id)
+        .where(
+            Request.user_id == current_request.user_id,
+            Request.id != current_request.id,
+            Request.service_type == current_request.service_type,
+            Request.car_id == current_request.car_id,
+            Request.status.in_(["new", "offer_sent", "accepted"]),
+        )
+    )
+    rows = result.all()
+
+    for other, sc in rows:
+        other.status = "rejected"
+        other.rejected_at = datetime.utcnow()
+        # Добавляем пометку в комментарий
+        if other.manager_comment:
+            other.manager_comment += "\n\nАвтоотказ: клиент выбрал другой сервис."
+        else:
+            other.manager_comment = "Автоотказ: клиент выбрал другой сервис."
+
+        # Обновляем клавиатуру в чате сервиса, если есть чат_message_id
+        try:
+            await update_chat_keyboard(bot, other.id)
+        except Exception as e:
+            logging.error(
+                "❌ Не удалось обновить клавиатуру по заявке #%s после auto-decline: %s",
+                other.id,
+                e,
+            )
 
 
 @router.callback_query(F.data.startswith("client_reject_offer:"))
-async def client_reject_offer(callback: CallbackQuery):
-    """Клиент отклоняет условия менеджера по заявке"""
+async def client_reject_offer(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """
+    Клиент нажал 'Отклонить предложение'.
+    Переводим эту заявку в 'rejected', уведомляем сервис и оставляем остальные заявки живыми.
+    """
+    await callback.answer()
+
     try:
         request_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.message.answer("Не удалось определить заявку.")
+        return
 
-        async with AsyncSessionLocal() as session:
-            user_result = await session.execute(
-                select(User).where(User.telegram_id == callback.from_user.id)
-            )
-            user = user_result.scalar_one_or_none()
-            if not user:
-                await callback.answer("❌ Пользователь не найден. Нажмите /start", show_alert=True)
-                return
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Request).where(Request.id == request_id)
+        )
+        request: Request | None = result.scalar_one_or_none()
+        if not request:
+            await callback.message.edit_text("Заявка не найдена.")
+            return
 
-            req_result = await session.execute(
-                select(Request).where(
-                    Request.id == request_id,
-                    Request.user_id == user.id,
-                )
-            )
-            request = req_result.scalar_one_or_none()
-            if not request:
-                await callback.answer("❌ Заявка не найдена", show_alert=True)
-                return
+        request.status = "rejected"
+        request.rejected_at = datetime.utcnow()
+        # Дописать пометку в комментарий, что отклонено клиентом
+        if request.manager_comment:
+            request.manager_comment += "\n\nОтклонено клиентом."
+        else:
+            request.manager_comment = "Отклонено клиентом."
 
-            request.status = "rejected"
-            await session.commit()
+        await session.commit()
 
-        await callback.message.edit_text(
-            f"❌ Вы отклонили условия по заявке #{request_id}.\n"
-            f"Если хотите, вы можете создать новую заявку."
+    try:
+        await update_chat_keyboard(callback.bot, request_id)
+    except Exception as e:
+        logging.error(
+            "❌ Не удалось обновить клавиатуру по заявке #%s после reject_offer: %s",
+            request_id,
+            e,
         )
 
-        try:
-            await callback.bot.send_message(
-                chat_id=config.MANAGER_CHAT_ID,
-                text=(
-                    f"❌ Клиент отклонил условия по заявке #{request_id}\n\n"
-                    f"Комментарий менеджера:\n"
-                    f"{request.manager_comment or '—'}"
-                ),
-            )
-        except Exception as e:
-            logging.error(f"❌ Не удалось уведомить менеджеров об отказе: {e}")
-
-        try:
-            from app.handlers.chat_handlers import update_chat_keyboard
-            await update_chat_keyboard(callback.bot, request_id)
-        except Exception as e:
-            logging.error(f"❌ Не удалось обновить клавиатуру в чате заявки: {e}")
-
-        await callback.answer()
-
-    except Exception as e:
-        logging.error(f"❌ Ошибка при отказе от условий клиентом: {e}")
-        await callback.answer("❌ Ошибка, попробуйте позже", show_alert=True)
+    await callback.message.edit_text(
+        "❌ Предложение сервиса отклонено.\n\n"
+        "Вы можете дождаться других предложений или создать новую заявку."
+    )
 
 
 # ✅ Новый хэндлер: экран "Мои бонусы"

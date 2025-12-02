@@ -578,7 +578,7 @@ async def manager_start_work_handler(
         await session.commit()
 
     # Обновляем клавиатуру в карточке
-    await update_chat_keyboard(request_id, callback.message.chat.id, callback.bot)
+    await update_chat_keyboard(callback.bot, request_id)
     await callback.answer("Заявка принята в работу ✅")
 
 
@@ -629,7 +629,7 @@ async def manager_finish_work_handler(
 
         await session.commit()
 
-    await update_chat_keyboard(request_id, callback.message.chat.id, callback.bot)
+    await update_chat_keyboard(callback.bot, request_id)
 
     # На этом шаге просто фиксируем "завершено".
     # Следующим этапом повесим сюда запрос оценки и отзыва.
@@ -687,7 +687,7 @@ async def manager_cancel_after_accept_handler(
 
         await session.commit()
 
-    await update_chat_keyboard(request_id, callback.message.chat.id, callback.bot)
+    await update_chat_keyboard(callback.bot, request_id)
     await callback.answer("Заявка отменена 🚫")
 
 
